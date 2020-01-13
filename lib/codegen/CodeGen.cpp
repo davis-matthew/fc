@@ -30,150 +30,66 @@
 #include "AST/SymbolTable.h"
 #include "AST/Type.h"
 #include "codegen/CGASTHelper.h"
-#include "codegen/LLVMUtil.h"
-#include "codegen/RuntimeHelper.h"
 #include "common/Debug.h"
-#include "llvm/Analysis/ValueTracking.h"
+#include "dialect/FCOps/FCOps.h"
+#include "llvm/Support/CommandLine.h"
 #include "llvm/Support/FileSystem.h"
 
 #include "llvm-c/Target.h"
-#include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/Module.h"
-#include "llvm/IR/Verifier.h"
-#include "llvm/MC/SubtargetFeature.h"
-#include "llvm/Support/TargetRegistry.h"
-#include "llvm/Target/TargetMachine.h"
-#include "llvm/Target/TargetOptions.h"
+
+#include "mlir/Analysis/Verifier.h"
+#include "mlir/Dialect/AffineOps/AffineOps.h"
+#include "mlir/Dialect/StandardOps/Ops.h"
+#include "mlir/IR/AffineExpr.h"
+#include "mlir/IR/Attributes.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/Function.h"
+#include "mlir/IR/StandardTypes.h"
 
 using namespace fc;
 using namespace ast;
 using namespace llvm;
 
-CodeGen::CodeGen(ASTContext &C, std::unique_ptr<llvm::Module> &M,
-                 bool EnableDebug, Standard std,
-                 std::unique_ptr<llvm::TargetMachine> &TM)
-    : ASTProgramPass(C, "LLVM CodeGenerator Pass"), TheModule(M), TM(TM),
-      EnableDebug(EnableDebug), std(std) {
-  LLContext = &TheModule->getContext();
+static llvm::cl::opt<bool>
+    DumpBeforeVerify("dump-before-verify",
+                     llvm::cl::desc("Dump MLIR module before verification"),
+                     llvm::cl::init(false));
+
+CodeGen::CodeGen(ASTContext &C, mlir::OwningModuleRef &theModule,
+                 mlir::MLIRContext &mlirContext, Standard std)
+    : ASTProgramPass(C, "LLVM CodeGenerator Pass"), C(C),
+      mlirContext(mlirContext), builder(&mlirContext), theModule(theModule),
+      std(std) {}
+
+FC::FCLoadOp CodeGen::emitLoadInstruction(mlir::Value V,
+                                          const llvm::Twine &Name,
+                                          bool disableTBAA) {
+
+  auto loadOp = builder.create<FC::FCLoadOp>(builder.getUnknownLoc(), V);
+  loadOp.setAttr("name", builder.getStringAttr(Name.getSingleStringRef()));
+  return loadOp;
 }
 
-llvm::LoadInst *CodeGen::emitStructLoadInst(llvm::Value *V,
-                                            llvm::Value *structPtr,
-                                            llvm::Type *structTy,
-                                            uint64_t offset,
-                                            const ::llvm::Twine &Name) {
-
-  auto structPtrTy = llvm::dyn_cast<llvm::PointerType>(structTy);
-  assert(structPtrTy);
-  auto ptrTy = llvm::dyn_cast<llvm::PointerType>(V->getType());
-  assert(ptrTy && "Loading a non pointer value");
-
-  auto LI = IRB->CreateLoad(V, Name);
-  if (context.isParallelLoop) {
-    LI->setMetadata(LLVMContext::MD_mem_parallel_loop_access,
-                    llvm::MDNode::get(LI->getContext(), {}));
-  }
-
-  if (auto MDN =
-          tbaaHelper->getTBAAForStruct(structPtr, structPtrTy->getElementType(),
-                                       offset, ptrTy->getElementType())) {
-    LI->setMetadata(LLVMContext::MD_tbaa, MDN);
-  }
-
-  return LI;
-}
-
-void CodeGen::emitStructStoreInst(llvm::Value *V, llvm::Value *Ptr,
-                                  llvm::Value *structPtr, llvm::Type *structTy,
-                                  uint64_t offset) {
-  auto structPtrTy = llvm::dyn_cast<llvm::PointerType>(structTy);
-  assert(structPtrTy);
-  auto ptrTy = llvm::dyn_cast<llvm::PointerType>(Ptr->getType());
-  assert(ptrTy && "Storing to  a non pointer value");
-
-  auto SI = IRB->CreateStore(V, Ptr);
-  if (context.isParallelLoop) {
-    SI->setMetadata(LLVMContext::MD_mem_parallel_loop_access,
-                    llvm::MDNode::get(SI->getContext(), {}));
-  }
-
-  if (auto MDN =
-          tbaaHelper->getTBAAForStruct(structPtr, structPtrTy->getElementType(),
-                                       offset, ptrTy->getElementType())) {
-    SI->setMetadata(LLVMContext::MD_tbaa, MDN);
-  }
-}
-
-llvm::LoadInst *CodeGen::emitLoadInstruction(llvm::Value *V,
-                                             const llvm::Twine &Name,
-                                             bool disableTBAA) {
-
-  // TODO: remove this. Temporarily doing this since getting "Old-style TBAA is
-  // no longer allowed, use struct-path TBAA instead" error during some
-  // arr-in-struct accesss
-  if (freezeTBAA)
-    disableTBAA = true;
-
-  auto ptrTy = llvm::dyn_cast<llvm::PointerType>(V->getType());
-  assert(ptrTy && "Loading a non pointer value");
-
-  auto LI = IRB->CreateLoad(V, Name);
-  if (context.isParallelLoop) {
-    LI->setMetadata(LLVMContext::MD_mem_parallel_loop_access,
-                    llvm::MDNode::get(LI->getContext(), {}));
-  }
-
-  auto Ptr = llvm::GetUnderlyingObject(V, TheModule->getDataLayout());
-  /*
-  if (auto MDN = tbaaHelper->getTBAANodeForType(ptrTy->getElementType()))
-    LI->setMetadata(LLVMContext::MD_tbaa, MDN);
-  */
-
-  if (auto MDN = tbaaHelper->getTBAANodeForPtr(Ptr)) {
-    if (!disableTBAA)
-      LI->setMetadata(LLVMContext::MD_tbaa, MDN);
-  }
-
-  return LI;
-}
-
-void CodeGen::emitStoreInstruction(llvm::Value *V, llvm::Value *Ptr,
+void CodeGen::emitStoreInstruction(mlir::Value V, mlir::Value Ptr,
                                    bool disableTBAA) {
-
-  auto ptrTy = llvm::dyn_cast<llvm::PointerType>(Ptr->getType());
-  assert(ptrTy && "Storing to  a non pointer value");
-
-  auto SI = IRB->CreateStore(V, Ptr);
-  if (context.isParallelLoop) {
-    SI->setMetadata(LLVMContext::MD_mem_parallel_loop_access,
-                    llvm::MDNode::get(SI->getContext(), {}));
-  }
-
-  auto VPtr = llvm::GetUnderlyingObject(Ptr, TheModule->getDataLayout());
-  /*
-  if (auto MDN = tbaaHelper->getTBAANodeForType(ptrTy->getElementType()))
-    SI->setMetadata(LLVMContext::MD_tbaa, MDN);
-  */
-
-  if (auto MDN = tbaaHelper->getTBAANodeForPtr(VPtr)) {
-    if (!disableTBAA)
-      SI->setMetadata(LLVMContext::MD_tbaa, MDN);
-  }
+  builder.create<FC::FCStoreOp>(builder.getUnknownLoc(), V, Ptr);
 }
 
-void CodeGen::setCurrLineForDebug(SourceLoc loc) {
-  if (EnableDebug)
-    IRB->SetCurrentDebugLocation(debugHelper->getLoc(loc));
+void CodeGen::setCurrLineForDebug(SourceLoc loc) {}
+
+mlir::Block *CodeGen::getNewBlock(mlir::Block *insertBefore) {
+  auto insertPt = builder.saveInsertionPoint();
+  mlir::Region::iterator it(insertBefore);
+  mlir::Block *block;
+  if (context.currRegion)
+    block = builder.createBlock(context.currRegion, it);
+  else
+    block = builder.createBlock(insertBefore);
+  builder.restoreInsertionPoint(insertPt);
+  return block;
 }
 
-BasicBlock *CodeGen::getNewBlock(StringRef name, bool insertToFn) {
-  auto BB = BasicBlock::Create(*LLContext, name);
-  if (insertToFn)
-    BB->insertInto(context.currFn);
-  return BB;
-}
-
-llvm::Value *CodeGen::getValue(Symbol *symbol) {
+mlir::Value CodeGen::getValue(Symbol *symbol) {
   auto parenSym = symbol->getParentSymbol();
   if (parenSym)
     symbol = parenSym;
@@ -181,38 +97,25 @@ llvm::Value *CodeGen::getValue(Symbol *symbol) {
   return context.symbolMap[symbol->getName()];
 }
 
-llvm::AllocaInst *CodeGen::createAlloca(llvm::Type *type,
-                                        llvm::StringRef name) {
-
-  auto *I = LLVMUtil::getFirstNonAllocaInst(&context.currFn->getEntryBlock());
-  auto alloca = new AllocaInst(type, 0, name, I);
-  if (I == nullptr)
-    context.currFn->getEntryBlock().getInstList().push_back(alloca);
-
-  return alloca;
+FC::AllocaOp CodeGen::createAlloca(mlir::Type type, llvm::StringRef name) {
+  llvm::SmallVector<mlir::Value, 2> vals;
+  auto alloc = builder.create<FC::AllocaOp>(builder.getUnknownLoc(), name,
+                                            type.cast<FC::RefType>(), vals);
+  return alloc;
 }
 
-llvm::AllocaInst *CodeGen::createAlloca(Symbol *symbol) {
-  auto llType = cgHelper->getLLVMTypeFor(symbol);
-  auto *I = LLVMUtil::getFirstNonAllocaInst(&context.currFn->getEntryBlock());
-  auto alloca = new AllocaInst(llType, 0, symbol->getName(), I);
-  if (I == nullptr)
-    context.currFn->getEntryBlock().getInstList().push_back(alloca);
-
-  if (EnableDebug) {
-
-    debugHelper->getLocalVariable(alloca, symbol, -1,
-                                  &context.currFn->getEntryBlock());
+FC::AllocaOp CodeGen::createAlloca(Symbol *symbol) {
+  auto llType = cgHelper->getMLIRTypeFor(symbol);
+  if (!llType.isa<FC::RefType>()) {
+    llType = FC::RefType::get(llType);
   }
-
-  if (symbol->getType()->isDynArrayTy()) {
-    llvm::Value *isAllocated = IRB->CreateStructGEP(nullptr, alloca, 2, "flag");
-    emitStoreInstruction(IRB->getFalse(), isAllocated, true);
-  }
-  return alloca;
+  auto alloc = builder.create<FC::AllocaOp>(getLoc(symbol->getSourceLoc()),
+                                            symbol->getName(),
+                                            llType.cast<FC::RefType>());
+  return alloc;
 }
 
-llvm::Argument *CodeGen::getIntentArgForSymbol(Symbol *symbol) {
+mlir::Value CodeGen::getIntentArgForSymbol(Symbol *symbol) {
   unsigned argNum = 0;
   assert(context.currPU->isSubroutine() || context.currPU->isFunction());
   auto sub = static_cast<Function *>(context.currPU);
@@ -232,14 +135,18 @@ llvm::Argument *CodeGen::getIntentArgForSymbol(Symbol *symbol) {
     }
   }
 
-  unsigned I = 0;
-  for (auto &LLArg : context.currFn->args()) {
-    if (hasIntentArg && I == 0) {
-      hasIntentArg = false;
-      continue;
+  if (hasIntentArg) {
+    auto subPUHelper = cgHelper->getSubPUHelper(context.currPU->getParent());
+    if (argNum >= subPUHelper->startIndex) {
+      llvm_unreachable("Something went wrong with frame args");
     }
+  }
+
+  unsigned I = 0;
+  for (auto LLArg = context.currFn.args_begin();
+       LLArg != context.currFn.args_end(); ++LLArg) {
     if (I == argNum) {
-      return &LLArg;
+      return (*LLArg);
     }
     I++;
   }
@@ -254,7 +161,6 @@ bool CodeGen::updatesymbolMapForIntentArg(Symbol *symbol) {
 }
 
 void CodeGen::updateSymbolMapForFuncArg(Symbol *symbol) {
-
   assert(context.currPU->isFunction());
   auto func = static_cast<Function *>(context.currPU);
 
@@ -267,189 +173,205 @@ void CodeGen::updateSymbolMapForFuncArg(Symbol *symbol) {
   }
 
   unsigned i = 0;
-  llvm::Argument *Arg;
-  for (auto &LLArg : context.currFn->args()) {
+  mlir::Value Arg;
+  for (auto LLArg = context.currFn.args_begin();
+       LLArg != context.currFn.args_end(); ++LLArg) {
     if (i == argNum) {
-      Arg = &LLArg;
+      Arg = (*LLArg);
       break;
     }
     ++i;
   }
+
   context.symbolMap[symbol->getName()] = Arg;
 }
 
 // This function handles the initializer for all the local variables.
 bool CodeGen::emitEntityDecl(EntityDecl *entityDecl) {
   auto sym = entityDecl->getSymbol();
-  auto LLVar = context.getLLVMValueFor(sym->getName());
-  assert(LLVar && "Could not find LLVM value allocated!");
+  auto LLVar = context.getMLIRValueFor(sym->getName());
+  assert(LLVar && "Could not find MLIR value allocated!");
+  auto Init = entityDecl->getInit();
+  mlir::Value InitExpr = nullptr;
+  fc::Type *Ty = sym->getType();
 
   if (sym->getAllocKind() == AllocationKind::Argument) {
     return true;
   }
 
-  auto Init = entityDecl->getInit();
-  llvm::Value *InitExpr = nullptr;
-  fc::Type *Ty = sym->getType();
-  if (Init) {
-    if (auto Const = llvm::dyn_cast<ConstantVal>(Init)) {
-      auto type = Const->getType();
-      if (type->isArrayTy()) {
-        llvm::SmallVector<llvm::StringRef, 2> constList;
-        for (auto &val : Const->getConstant()->getArrValue()) {
-          constList.push_back(val);
+  if (sym->getAllocKind() == AllocationKind::StaticLocal) {
+    if (Init) {
+      if (auto Const = llvm::dyn_cast<ConstantVal>(Init)) {
+        auto type = Const->getType();
+        if (type->isArrayTy()) {
+          llvm::SmallVector<llvm::StringRef, 2> constList;
+          for (auto &val : Const->getConstant()->getArrValue()) {
+            constList.push_back(val);
+          }
+          InitExpr = emitConstant(constList, Const->getType(), Ty, true);
+        } else {
+          InitExpr = emitExpression(Init, false);
         }
-        InitExpr = emitConstant(constList, Const->getType(), Ty, true);
       } else {
-        InitExpr =
-            emitConstant(Const->getValueRef(), Const->getType(), Ty, true);
+        InitExpr = emitExpression(Init, false);
       }
-    } else {
-      InitExpr = emitExpression(Init, false);
-    }
-  }
-
-  switch (sym->getAllocKind()) {
-  case StaticLocal:
-    if (InitExpr) {
       emitStoreInstruction(InitExpr, LLVar);
     }
-    break;
-  case StaticGlobal: {
-    llvm::Constant *InitValue = nullptr;
-    auto gVar = llvm::dyn_cast<llvm::GlobalVariable>(LLVar);
-    assert(gVar);
-    auto LLType = gVar->getValueType();
-    if (!InitExpr) {
-      InitValue = llvm::Constant::getNullValue(LLType);
+    return true;
+  }
+
+  if (sym->getAllocKind() == AllocationKind::StaticGlobal) {
+    if (Init) {
+      auto InitConst = dyn_cast<ConstantVal>(Init);
+      assert(InitConst);
+      FC::AllocaOp global;
+      global = llvm::dyn_cast<FC::AllocaOp>(LLVar.getDefiningOp());
+      if (!global) {
+        return true;
+      }
+      auto eleType = global.getType().getEleTy();
+      if (!global.getType().isStatic())
+        return true;
+
+      if (eleType.isa<FC::ArrayType>() &&
+          global.getType().getUnderlyingEleType().isF32()) {
+        llvm::SmallVector<float, 2> constList;
+        for (auto &val : InitConst->getConstant()->getArrValue()) {
+          constList.push_back(std::stof(val));
+        }
+        auto attr = builder.getF32ArrayAttr(constList);
+        global.setAttr("value", attr);
+        return true;
+      }
+      if (sym->getType()->isStringArrTy()) {
+        auto arrTy = static_cast<ArrayType *>(sym->getType());
+        assert(!arrTy->isDynArrayTy());
+        assert(arrTy->getNumDims() == 1);
+        auto bound = arrTy->getBoundsList()[0];
+        auto size = bound.second - bound.first + 1;
+        auto initRef = InitConst->getValue();
+
+        // Padding the string with \0 to match size
+        for (int i = initRef.size(); i < size; ++i)
+          initRef.push_back('\0');
+
+        global.setAttr("value", mlir::StringAttr::get(initRef, &mlirContext));
+      } else if (eleType.isa<mlir::IntegerType>()) {
+
+        int64_t value;
+        if (eleType.isInteger(1)) {
+          value = InitConst->getBool();
+        } else {
+          value = InitConst->getInt();
+        }
+        global.setAttr("value", mlir::IntegerAttr::get(eleType, value));
+
+      } else if (eleType.isa<mlir::FloatType>()) {
+        double d;
+        if (InitConst->getType()->isFloatingTy()) {
+          d = InitConst->getFloat();
+        } else {
+          int value;
+          if (InitConst->getValueRef().consumeInteger(10, value))
+            assert(false);
+          d = value;
+        }
+        global.setAttr("value", mlir::FloatAttr::get(eleType, d));
+      } else {
+        assert("unknown type");
+      }
+    }
+    return true;
+  }
+  llvm_unreachable("unhandled Allocation type");
+}
+
+bool CodeGen::createGlobalExternForSymbol(Symbol *symbol) { return true; }
+
+bool CodeGen::updateArgForNestProgramUnit() { return true; }
+
+void CodeGen::emitParentVariableAccess(Symbol *sym) {
+  auto symRef = getSymbolScopeList(sym);
+  auto op = getOpForSymRef(symRef);
+
+  mlir::Type modVarType;
+  auto moduleVar = llvm::dyn_cast_or_null<FC::AllocaOp>(op);
+  if (!moduleVar) {
+    auto captureOp = llvm::dyn_cast_or_null<FC::CaptureArgOp>(op);
+    if (!captureOp) {
+      auto PU = sym->getOrigSymbol()->getSymTable()->getProgramUnit();
+      assert(PU);
+      auto func = llvm::cast<fc::ast::Function>(PU);
+      auto argNum = func->getArgNumForSymbol(sym->getName());
+      auto funcOp = context.currFn.getParentOfType<FC::FCFuncOp>();
+      assert(funcOp);
+      auto arg = funcOp.getArgument(argNum);
+      auto insertpt = builder.saveInsertionPoint();
+      builder.setInsertionPointToStart(&funcOp.front());
+      builder.create<FC::CaptureArgOp>(getLoc(sym->getSourceLoc()), arg,
+                                       sym->getName());
+      builder.restoreInsertionPoint(insertpt);
+      modVarType = arg.getType();
     } else {
-      InitValue = llvm::dyn_cast<llvm::Constant>(InitExpr);
+      modVarType = captureOp.getType();
     }
-
-    if (!InitValue) {
-      error() << "Init expression for global variable is not constant: "
-              << sym->getName() << "\n";
-      llvm_unreachable("NOn constant init");
-    }
-    gVar->setInitializer(InitValue);
-    break;
+  } else {
+    moduleVar.setCaptured(builder.getBoolAttr(true));
+    modVarType = moduleVar.getType();
   }
-  default:
-    llvm_unreachable("unhandled Allocation type");
-  };
-  return true;
+
+  auto addrOfOp = builder.create<FC::GetElementRefOp>(
+      getLoc(sym->getSourceLoc()), symRef, modVarType.cast<FC::RefType>());
+  context.symbolMap[sym->getName()] = addrOfOp;
 }
 
-bool CodeGen::createGlobalExternForSymbol(Symbol *symbol) {
-  // These are mostly extern global symbols.
-  assert(symbol->getAllocKind() == StaticGlobal);
-  auto LLTy = cgHelper->getLLVMTypeFor(symbol->getType());
+mlir::SymbolRefAttr CodeGen::getSymbolScopeList(Symbol *sym) {
 
-  auto name = cgHelper->getGlobalSymbolName(symbol);
+  sym = sym->getOrigSymbol();
+  auto symTable = sym->getSymTable();
 
-  auto var = TheModule->getOrInsertGlobal(name, LLTy);
-  if (symbol->getAttr().linkKind == fc::Link_Internal) {
-    auto gVar = llvm::cast<GlobalVariable>(var);
-    gVar->setLinkage(llvm::GlobalValue::PrivateLinkage);
+  // Belongs to global scope.
+  if (sym->getParentSymbol() == nullptr && sym->getType()->isFunctionTy()) {
+    auto PU = symTable->getProgramUnit();
+    if (PU && PU->getProgramUnitList().empty() && !symTable->isModuleScope()) {
+      return builder.getSymbolRefAttr(sym->getName());
+    }
   }
+  llvm::SmallVector<FlatSymbolRefAttr, 2> attrList;
+  while (symTable && !symTable->isGlobalScope()) {
+    attrList.push_back(builder.getSymbolRefAttr(symTable->getName()));
+    symTable = symTable->getParent();
+  }
+  // std::reverse(attrList.begin(), attrList.end());
+  auto symRef = builder.getSymbolRefAttr(sym->getName(), attrList);
 
-  context.symbolMap[symbol->getName()] = var;
-  return true;
+  return symRef;
 }
 
-bool CodeGen::constructFrameArgForProgramUnit() {
-  // Look if frame argument needs to be constructed for the nested routines.
-  auto helper = cgHelper->getSubPUHelper(context.currPU);
-  if (!helper || !helper->hasFrameArg)
-    return true;
-
-  auto structName = "FRAME." + context.currPU->getName().str();
-  // Allocate the structure type.
-  auto structAlloca = createAlloca(helper->frameTy, structName);
-
-  // Now fill the structure with all the corresponding symbols.
-  unsigned I = 0;
-  for (auto sym : helper->set) {
-    auto name = helper->frameTy->getStructName();
-    auto GEP = IRB->CreateStructGEP(helper->frameTy, structAlloca, I,
-                                    name + "." + sym->getName());
-
-    if (sym->hasIntent()) {
-      auto Arg = getIntentArgForSymbol(sym);
-      assert(Arg);
-      IRB->CreateStore(Arg, GEP, false);
-      GEP = Arg;
-    }
-    context.symbolMap[sym->getName()] = GEP;
-    I++;
+mlir::Operation *CodeGen::getOpForSymRef(mlir::SymbolRefAttr symRef) {
+  mlir::SymbolTable table(theModule.get());
+  mlir::Operation *op;
+  for (auto ref : llvm::reverse(symRef.getNestedReferences())) {
+    op = table.lookup(ref.getValue());
+    table = mlir::SymbolTable(op);
+    assert(op);
   }
-  context.symbolMap[structName] = structAlloca;
-  return true;
+  op = table.lookup(symRef.getRootReference());
+  return op;
 }
 
-bool CodeGen::updateArgForNestProgramUnit() {
-  // If it is nested unit, update the symbol map to use the
-  // structure loads.
-  if (!context.currPU->isNestedUnit())
-    return true;
-  auto parent = context.currPU->getParent();
-  assert(parent);
-  auto subPUHelper = cgHelper->getSubPUHelper(parent);
-  if (!subPUHelper || !subPUHelper->hasFrameArg)
-    return true;
-
-  llvm::Argument *Struct = &*context.currFn->args().begin();
-  assert(Struct);
-  unsigned I = 0;
-  for (auto sym : subPUHelper->set) {
-
-    // Some program units may use the local values for the
-    // same symbol name. For them, do not use the parent symbol
-    // value.
-    auto currPUSym =
-        context.currPU->getSymbolTable()->getSymbol(sym->getName());
-    if (currPUSym && currPUSym->getParentSymbol() == nullptr) {
-      I++;
-      continue;
-    }
-    auto GEP = IRB->CreateStructGEP(subPUHelper->frameTy, Struct, I,
-                                    sym->getName() + ".ptr");
-
-    if (sym->hasIntent()) {
-      GEP = IRB->CreateLoad(GEP, sym->getName());
-    }
-    context.symbolMap[sym->getName()] = GEP;
-    I++;
-  }
-  return true;
-}
-
-// Recursive function to nullify pointers that "belong" to \p addr that is
-// associated with fc::Type \p type.
-void CodeGen::nullifyPointerAlloca(Type *type, llvm::Value *addr) {
-  if (type->isPointerTy()) {
-    emitStoreInstruction(
-        llvm::Constant::getNullValue(addr->getType()->getPointerElementType()),
-        addr, /*disableTBAA*/ true);
-
-  } else if (auto structTy = llvm::dyn_cast<StructType>(type)) {
-    llvm::SmallVector<Type *, 2> memberTypes = structTy->getTypeList();
-    unsigned i = 0;
-    for (Type *memberType : memberTypes) {
-      if (memberType->isPointerTy() || memberType->isStructTy())
-        nullifyPointerAlloca(memberType,
-                             IRB->CreateStructGEP(nullptr, addr, i));
-      ++i;
-    }
-  }
+void CodeGen::emitModuleVariableAccess(Symbol *sym) {
+  auto symRef = getSymbolScopeList(sym);
+  auto op = getOpForSymRef(symRef);
+  assert(op);
+  auto moduleVar = llvm::dyn_cast<FC::AllocaOp>(op);
+  assert(moduleVar);
+  auto addrOfOp = builder.create<FC::GetElementRefOp>(
+      getLoc(sym->getSourceLoc()), symRef, moduleVar.getType());
+  context.symbolMap[sym->getName()] = addrOfOp;
 }
 
 bool CodeGen::emitSpecificationPart(SpecificationPart *specPart) {
-  // If there are sub programs which accesses the current routine
-  // variables , allocate them together in a frame struct.
-  if (!constructFrameArgForProgramUnit())
-    return false;
-
   // TODO May be not necessary
   bool isFunction = context.currPU->isFunction();
 
@@ -460,7 +382,7 @@ bool CodeGen::emitSpecificationPart(SpecificationPart *specPart) {
     setCurrLineForDebug(sym->getSourceLoc());
 
     // Already allocated..
-    if (context.getLLVMValueFor(sym->getName()) != nullptr)
+    if (context.getMLIRValueFor(sym->getName()) != nullptr)
       continue;
 
     // Point to the right argument.
@@ -470,20 +392,15 @@ bool CodeGen::emitSpecificationPart(SpecificationPart *specPart) {
     }
 
     if (sym->getAllocKind() == StaticLocal) {
-      if (std == Standard::f77) {
 
-        // If it is a dynamic array type in f77. Ignore .
-        // Will be malloc'ed later.
-        if (sym->getType()->isDynArrayTy() &&
-            sym->getParentSymbol() == nullptr) {
-          continue;
-        }
+      // If it is a dynamic array type in f77. Ignore .
+      // Will be malloc'ed later.
+      if (sym->getType()->isDynArrayTy() && sym->getParentSymbol() == nullptr) {
+        continue;
       }
       auto Alloca = createAlloca(sym);
-
-      nullifyPointerAlloca(sym->getType(), Alloca);
-
-      context.symbolMap[sym->getName()] = Alloca;
+      /* auto Alloca = createAllocStatic(sym); */
+      context.symbolMap[sym->getName()] = Alloca.getResult();
       continue;
     }
 
@@ -497,14 +414,17 @@ bool CodeGen::emitSpecificationPart(SpecificationPart *specPart) {
         continue;
       }
       assert(parentSym);
-      if (parentSym->getType()->isFunctionTy())
+      if (parentSym->getType()->isFunctionTy()) {
         continue;
+      }
     }
 
     // These are mostly extern global symbols.
     if (sym->getAllocKind() == StaticGlobal) {
-      if (!createGlobalExternForSymbol(sym))
-        return false;
+      auto Alloca = createAlloca(sym);
+      /* auto Alloca = createAllocStatic(sym); */
+      Alloca.setAttr("alloc_kind", builder.getStringAttr("static"));
+      context.symbolMap[sym->getName()] = Alloca.getResult();
       continue;
     }
 
@@ -519,6 +439,11 @@ bool CodeGen::emitSpecificationPart(SpecificationPart *specPart) {
     assert(parentSym);
     sym = parentSym;
 
+    if (sym->getSymTable()->isModuleScope()) {
+      emitModuleVariableAccess(sym);
+      continue;
+    }
+
     if (sym->getAllocKind() == StaticGlobal) {
       if (!createGlobalExternForSymbol(sym)) {
         return false;
@@ -526,6 +451,10 @@ bool CodeGen::emitSpecificationPart(SpecificationPart *specPart) {
       continue;
     }
 
+    if (context.currPU->isNestedUnit()) {
+      emitParentVariableAccess(parentSym);
+      continue;
+    }
     assert(context.currPU->isNestedUnit());
     assert(sym->getSymTable() == context.currPU->getParent()->getSymbolTable());
   }
@@ -553,32 +482,13 @@ bool CodeGen::emitSpecificationPart(SpecificationPart *specPart) {
   return true;
 }
 
-void CodeGen::emitDebugMetaForFunction() {
-
-  auto PU = context.currPU;
-  auto Fn = context.currFn;
-
-  auto EntryBB = &Fn->getEntryBlock();
-  auto sym = PU->getSymbolTable()->getParent()->getSymbol(PU->getName());
-  assert(sym);
-
-  auto subProg =
-      debugHelper->getSubProgram(context.currFn, sym->getSourceLoc());
-  debugHelper->pushScope(subProg);
-
-  Fn->setMetadata("dbg", subProg);
-  // Now emit arguments.
-  auto I = 1;
-  for (auto &arg : Fn->args()) {
-    auto sym = PU->getSymbolTable()->getSymbol(arg.getName());
-    if (!sym) {
-      I++;
-      continue;
-    }
-    debugHelper->getLocalVariable(&arg, sym, I, EntryBB);
-    I++;
+void CodeGen::emitDebugMetaForFunction() {}
+bool CodeGen::createSubPUHelpers(ProgramUnit *PU) {
+  for (auto subPU : PU->getProgramUnitList()) {
+    cgHelper->createSubPUHelper(subPU);
+    createSubPUHelpers(subPU);
   }
-  setCurrLineForDebug(sym->getSourceLoc());
+  return true;
 }
 
 bool CodeGen::emitFunctionDeclaration(ProgramUnit *PU) {
@@ -591,148 +501,132 @@ bool CodeGen::emitFunctionDeclaration(ProgramUnit *PU) {
   return true;
 }
 
-// Add target attributes for all the functions in the module.
-void CodeGen::visitLLVMModule() {
-
-  // Add TargetAttributes for all the functions.
-  for (llvm::Function &Fn : *(TheModule.get())) {
-    if (Fn.isDeclaration())
-      continue;
-    Fn.addFnAttr("target-features", TM->getTargetFeatureString());
-    Fn.addFnAttr("target-cpu", TM->getTargetCPU());
-
-    Fn.addFnAttr("no-frame-pointer-elim", "false");
-    Fn.addFnAttr(llvm::Attribute::NoUnwind);
-    Fn.addFnAttr(llvm::Attribute::UWTable);
-    Fn.addFnAttr("correctly-rounded-divide-sqrt-fp-math", "false");
-    Fn.addFnAttr("less-precise-fpmad", "false");
-    Fn.addFnAttr("no-infs-fp-math", "true");
-    Fn.addFnAttr("no-nans-fp-math", "true");
-    Fn.addFnAttr("no-signed-zeros-fp-math", "true");
-    Fn.addFnAttr("no-trapping-math", "true");
-    Fn.addFnAttr("unsafe-fp-math", "true");
-    Fn.addFnAttr("use-soft-float", "false");
-  }
-}
-
-llvm::Function *CodeGen::dumpMain(fc::Function *fcMain) {
-
-  // Find the main program.
-  auto MainProgFn = emitFunction(fcMain);
-  assert(MainProgFn);
-
-  auto Int32 = IRB->getInt32Ty();
-  auto I8PtrTy = IRB->getInt8PtrTy()->getPointerTo();
-
-  auto argcInit = llvm::Constant::getNullValue(Int32);
-  auto argVInit = llvm::Constant::getNullValue(I8PtrTy);
-
-  context.ArgC->setLinkage(llvm::GlobalValue::InternalLinkage);
-  context.ArgV->setLinkage(llvm::GlobalValue::InternalLinkage);
-  context.ArgC->setInitializer(argcInit);
-  context.ArgV->setInitializer(argVInit);
-
-  // Create a main program with i32 return type and no arguments
-  auto FnType = llvm::FunctionType::get(
-      IntegerType::get(TheModule->getContext(), 32), {Int32, I8PtrTy}, false);
-  auto mainFn = llvm::Function::Create(
-      FnType, llvm::GlobalValue::ExternalLinkage, "main", TheModule.get());
-
-  auto EntryBB = BasicBlock::Create(*LLContext, "entry", mainFn);
-  IRB->SetInsertPoint(EntryBB);
-
-  Value *arg0 = nullptr, *arg1 = nullptr;
-  unsigned i = 0;
-  for (auto &LLArg : mainFn->args()) {
-    if (i == 0) {
-      arg0 = &LLArg;
-      i++;
-      continue;
-    }
-
-    if (i == 1) {
-      arg1 = &LLArg;
-      break;
-    }
-    llvm_unreachable("Never reached");
-  }
-
-  assert(arg0 && arg1);
-
-  emitStoreInstruction(arg0, context.ArgC);
-  emitStoreInstruction(arg1, context.ArgV);
-
-  auto Call = IRB->CreateCall(MainProgFn);
-  IRB->CreateRet(Call);
-
-  return MainProgFn;
-}
-
 bool CodeGen::emitASTModule(ast::Module *module) {
+  auto loc = builder.getUnknownLoc();
+  // TODO: loc
+  auto fortranModuleOp = FC::FortranModuleOp::create(loc, module->getName());
+  theModule->push_back(fortranModuleOp);
+  builder.setInsertionPointToStart(&fortranModuleOp.body().front());
   emitSpecificationPart(module->getSpec());
   return true;
 }
 
 void CodeGen::deAllocateTemps() {
-  auto freeFn = cgHelper->getFreeFunction();
   for (auto II = context.functionAllocMap.begin();
        II != context.functionAllocMap.end(); ++II) {
     if (II->second) {
-      auto ptr = IRB->CreateBitCast(II->first, IRB->getInt8PtrTy());
-      IRB->CreateCall(freeFn, {ptr});
+      builder.create<FC::DeallocaOp>(builder.getUnknownLoc(), II->first);
       II->second = false;
     }
   }
 }
 
-llvm::Function *CodeGen::emitFunction(fc::Function *func) {
+mlir::Location CodeGen::getLoc(fc::SourceLoc loc) {
+  return builder.getFileLineColLoc(builder.getIdentifier(parseTree->getName()),
+                                   loc.Line, loc.Col);
+}
+
+// Populate vector with extra args from parent
+void CodeGen::populateExtraArgumentType(
+    llvm::SmallVector<mlir::Type, 2> &captureList) {
+  return;
+}
+
+FC::FCFuncOp CodeGen::emitFunction(fc::Function *func) {
 
   auto name = cgHelper->getNameForProgramUnit(func);
-  auto fn = (TheModule->getFunction(name));
+  bool hasFrameArg = false;
+  auto funcType = cgHelper->getMLIRTypeFor(context.currPU, hasFrameArg)
+                      .cast<mlir::FunctionType>();
+  auto mlirloc = builder.getUnknownLoc();
+  FC::FCFuncOp fn;
+  if (func->isNestedUnit() || func->getParent()->isModule()) {
+    switch (func->getParent()->getKind()) {
+    case ModuleKind: {
+      fn = FC::FCFuncOp::create(mlirloc, name, funcType);
+      auto fortranModuleOp = theModule->lookupSymbol<FC::FortranModuleOp>(
+          func->getParent()->getName());
+      assert(fortranModuleOp);
+      fortranModuleOp.push_back(fn);
+    } break;
+    default:
+      fn = llvm::dyn_cast_or_null<FC::FCFuncOp>(
+          context.currFn.lookupSymbol(name));
+      if (!fn) {
+        fn = FC::FCFuncOp::create(mlirloc, name, funcType);
+        context.currFn.addNestedFunction(fn);
+      }
+      fn.setAttr("linkage_type", builder.getStringAttr("internal"));
+      break;
+    };
+  } else {
+    fn = llvm::dyn_cast_or_null<FC::FCFuncOp>(theModule->lookupSymbol(name));
+    if (!fn) {
+      fn = FC::FCFuncOp::create(mlirloc, name, funcType);
+      theModule->push_back(fn);
+    }
+  }
   assert(fn);
 
-  auto EntryBB = BasicBlock::Create(*LLContext, "entry", fn);
-  IRB->SetInsertPoint(EntryBB);
-
-  context.currBB = EntryBB;
+  auto EntryBB = fn.addEntryBlock();
   context.currFn = fn;
-
-  if (EnableDebug)
-    emitDebugMetaForFunction();
+  builder.setInsertionPointToEnd(EntryBB);
+  context.currBB = EntryBB;
 
   emitSpecificationPart(func->getSpec());
 
   emitExecutionPart(func->getExecPart());
 
+  mlirloc = builder.getUnknownLoc();
+
   if (func->isSubroutine()) {
-    IRB->CreateRetVoid();
+    bool hasReturn = false;
+    if (auto block = builder.getInsertionBlock()) {
+      if (!block->empty()) {
+        auto &op = block->back();
+        if (op.isKnownTerminator()) {
+          if (isa<FC::FCReturnOp>(op)) {
+            hasReturn = true;
+          }
+        }
+      }
+    }
+    if (!hasReturn)
+      builder.create<FC::FCReturnOp>(mlirloc);
   } else if (func->isMainProgram()) {
-    if (context.needReturn)
-      IRB->CreateRet(IRB->getInt32(0));
+    auto constant = builder.create<mlir::ConstantIntOp>(mlirloc, 0, 32);
+    SmallVector<mlir::Value, 2> ops = {constant.getResult()};
+    builder.create<FC::FCReturnOp>(mlirloc, ops);
   } else {
-    auto returnVal = context.getLLVMValueFor(func->getName());
+    auto returnVal = context.getMLIRValueFor(func->getName());
     assert(returnVal);
-    auto LI = IRB->CreateLoad(returnVal);
-    // emitStoreInstruction(LI, returnGV);
-    IRB->CreateRet(LI);
+    auto type = returnVal.getType();
+
+    // Hint the allocator to use the malloc for memory allocation.
+    // TODO: It will be freed once the copy to the called function happens.
+    // FIXME: Is there a better way to do this?
+    if (auto allocOp =
+            llvm::dyn_cast_or_null<FC::AllocaOp>(returnVal.getDefiningOp())) {
+      auto refType = type.cast<FC::RefType>();
+      if (refType.getEleTy().isa<FC::ArrayType>()) {
+        allocOp.setAttr("use_malloc", builder.getBoolAttr(true));
+      }
+    }
+    auto LI = builder.create<FC::FCLoadOp>(mlirloc, returnVal);
+    SmallVector<mlir::Value, 2> ops = {LI};
+    builder.create<FC::FCReturnOp>(mlirloc, ops);
   }
 
-  IRB->SetInsertPoint(context.currBB->getTerminator());
+  builder.setInsertionPoint(context.currBB->getTerminator());
   deAllocateTemps();
-  IRB->SetInsertPoint(context.currBB);
-
-  if (EnableDebug)
-    debugHelper->popScope();
-
+  builder.setInsertionPointToEnd(context.currBB);
   return fn;
 }
 
 bool CodeGen::emitProgramUnit(ProgramUnit *PU) {
 
-  tbaaHelper->resetTBAA();
-  tbaaHelper->initTBAA(PU->getName());
   llvm::StringRef fnName = "";
-  llvm::Function *Fn = nullptr;
+  FC::FCFuncOp Fn;
   auto kind = PU->getKind();
   context.currPU = PU;
   switch (kind) {
@@ -740,8 +634,8 @@ bool CodeGen::emitProgramUnit(ProgramUnit *PU) {
   case ProgramUnitKind::FunctionKind: {
     auto function = static_cast<Function *>(PU);
     Fn = emitFunction(function);
-    fnName = Fn->getName();
     assert(Fn);
+    fnName = Fn.getName();
     break;
   }
 
@@ -757,7 +651,8 @@ bool CodeGen::emitProgramUnit(ProgramUnit *PU) {
   case ProgramUnitKind::MainProgramKind: {
     auto fcMain = static_cast<fc::Function *>(PU);
     fnName = fcMain->getName();
-    Fn = dumpMain(fcMain);
+    Fn = emitFunction(fcMain);
+    Fn.setAttr("main_program", builder.getBoolAttr(true));
     if (!Fn) {
       error() << "\n Error during MainProgram emission\n";
       return false;
@@ -774,60 +669,33 @@ bool CodeGen::emitProgramUnit(ProgramUnit *PU) {
   // Now emit all the nested subroutines.
   for (auto subPU : PU->getProgramUnitList()) {
     context.currPU = PU;
+    context.currFn = Fn;
     if (!emitProgramUnit(subPU)) {
       error() << "\n Error during sub program emission\n";
       return false;
     }
   }
+
   return true;
 }
 
 bool CodeGen::runOnProgram(ParseTree *parseTree) {
   this->parseTree = parseTree;
+  this->theModule = mlir::ModuleOp::create(mlir::UnknownLoc::get(&mlirContext));
 
-  // Set the IR builder for the target.
-  IRBuilder<> TheBuilder(*LLContext);
-  IRB = &TheBuilder;
-  llvm::FastMathFlags flags;
-  flags.setFast();
-  IRB->setFastMathFlags(flags);
-  DIBuilder diBuild(*TheModule);
-  this->diBuilder = &diBuild;
-
+  debug() << C.inputFileName;
+  debug() << this->std;
   // Set the codegen helper class.
-  CGASTHelper cgHelper(parseTree, TheModule.get(), IRB, std);
+  CGASTHelper cgHelper(parseTree, theModule, builder, std);
   this->cgHelper = &cgHelper;
 
-  llvm::DICompileUnit *compileUnit = nullptr;
-  if (EnableDebug) {
-    llvm::SmallVector<char, 32> currDir;
-    llvm::sys::fs::current_path(currDir);
-    auto diFile = diBuilder->createFile(
-        parseTree->getName(), llvm::StringRef(currDir.begin(), currDir.size()));
-    compileUnit = diBuilder->createCompileUnit(
-        std == f77 ? dwarf::DW_LANG_Fortran77 : dwarf::DW_LANG_Fortran95,
-        diFile, "fc 0.1", true, "", 1, "");
+  // TODO: Remove
+  for (auto PU : parseTree->getProgramUnitList()) {
+    if (!createSubPUHelpers(PU)) {
+      error() << "MLIR CG: Failed to create mlir subou helpers\n";
+      return false;
+    }
   }
-  CGDebugInfo cgDebugInfo(&diBuild, &cgHelper, compileUnit);
-  this->debugHelper = &cgDebugInfo;
-
-  debugHelper->pushScope(compileUnit);
-
-  // Initialize tbaa helper
-  this->tbaaHelper = new CGTBAAInfo(TheModule.get());
-
-  auto Int32 = IRB->getInt32Ty();
-  auto I8PtrTy = IRB->getInt8PtrTy()->getPointerTo();
-
-  auto argc = TheModule->getOrInsertGlobal("fc.internal.argc", Int32);
-  auto argv = TheModule->getOrInsertGlobal("fc.internal.argv", I8PtrTy);
-
-  context.ArgC = llvm::cast<GlobalVariable>(argc);
-  context.ArgV = llvm::cast<GlobalVariable>(argv);
-
-  // Set runtime helper class.
-  RuntimeHelper runtimeHelper(TheModule, *LLContext);
-  this->runtimeHelper = &runtimeHelper;
 
   // Emit all subroutine declarations.
   for (auto PU : parseTree->getProgramUnitList()) {
@@ -845,18 +713,11 @@ bool CodeGen::runOnProgram(ParseTree *parseTree) {
     }
   }
 
-  if (EnableDebug)
-    diBuilder->finalize();
-  // Post processing module.
-  visitLLVMModule();
-
-  // Verify the LLVM IR generated.
-  bool broken = llvm::verifyModule(*TheModule.get(), &error());
-  if (broken)
+  if (DumpBeforeVerify)
+    theModule->dump();
+  if (failed(mlir::verify(theModule.get()))) {
+    theModule->emitError("module verification error");
     return false;
-
-  for (auto &Fn : *TheModule) {
-    broken |= (llvm::verifyFunction(Fn, &error()));
   }
-  return !broken;
+  return true;
 }

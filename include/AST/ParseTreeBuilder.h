@@ -89,6 +89,12 @@ public:
   PointerAssignmentStmt *buildPointerAssignmentStmt(Expr *lhs, Expr *rhs,
                                                     SourceLoc _sourceLoc);
 
+  // OpenMP statement
+  OpenMPParallelStmt *buildOpenMPParallelStmt(Block *block, SourceLoc loc);
+
+  OpenMPParallelDoStmt *buildOpenMPParallelDoStmt(DoStmt *dostmt,
+                                                  SourceLoc loc);
+
   StopStmt *buildStopStmt(Expr *stopCode, SourceLoc _sourceLoc);
 
   PrintStmt *buildPrintStmt(ExprList &exprList, SourceLoc _sourceLoc);

@@ -21,13 +21,22 @@
 // CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#ifndef FC_CG_AST_HELPER_H
-#define FC_CG_AST_HELPER_H
+#ifndef FC_MLIR_CG_AST_HELPER_H
+#define FC_MLIR_CG_AST_HELPER_H
+
 #include "AST/ParserTreeCommon.h"
 #include "common/Source.h"
-#include "llvm/IR/GlobalValue.h"
-#include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/Module.h"
+
+#include "mlir/Analysis/Verifier.h"
+#include "mlir/Dialect/AffineOps/AffineOps.h"
+#include "mlir/Dialect/StandardOps/Ops.h"
+#include "mlir/IR/AffineExpr.h"
+#include "mlir/IR/Attributes.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/Function.h"
+#include "mlir/IR/Module.h"
+#include "mlir/IR/StandardTypes.h"
+#include "mlir/IR/Types.h"
 
 #include <map>
 
@@ -41,16 +50,12 @@ using namespace ast;
 class CGASTHelper {
 private:
   ast::ParseTree *parseTree;
-  llvm::Module *TheModule;
+  mlir::OwningModuleRef &TheModule;
   ASTContext &C;
-  llvm::LLVMContext &LLC;
-  llvm::IRBuilder<> *IRB;
-  std::map<fc::ArrayType *, llvm::StructType *> dynArrMap;
-
-  std::map<fc::StructType *, llvm::StructType *> structTypeMap;
-
+  mlir::MLIRContext *LLC;
+  mlir::OpBuilder &builder;
   // Map to track functions and their return global value
-  std::map<std::string, llvm::Constant *> FuncRetMap;
+  std::map<std::string, mlir::Value> FuncRetMap;
 
   // Map to keep track of orinal PU name emitted PU name
   std::map<std::string, std::string> PUNameMap;
@@ -58,20 +63,21 @@ private:
   // This structure is to help emission of
   // nested subroutines.
   struct SubPUHelper {
-    // structure type of the frame argument.
-    llvm::StructType *frameTy;
     // Whether there is any frame arg.
     bool hasFrameArg;
     // What are the symbols to be passes to the
     // nested routines.
     SymbolSet set;
+    // Starting index for extra arguments which are symbols
+    // in parent PU used in this child PU.
+    unsigned startIndex;
 
-    SubPUHelper() : frameTy(nullptr), hasFrameArg(false) {}
+    SubPUHelper() : hasFrameArg(false) {}
 
     SubPUHelper(const SubPUHelper &other) {
-      this->frameTy = other.frameTy;
       this->hasFrameArg = other.hasFrameArg;
       this->set = other.set;
+      this->startIndex = other.startIndex;
     }
   };
 
@@ -81,19 +87,17 @@ private:
   Standard std;
 
 public:
-  explicit CGASTHelper(ast::ParseTree *tree, llvm::Module *module,
-                       llvm::IRBuilder<> *IRB, Standard std);
-  llvm::Type *getLLVMTypeFor(fc::Type *type);
+  explicit CGASTHelper(ast::ParseTree *tree, mlir::OwningModuleRef &module,
+                       mlir::OpBuilder &builder, Standard std);
+  mlir::Type getMLIRTypeFor(fc::Type *type);
 
-  llvm::Type *getLLVMTypeFor(Symbol *symbol);
+  mlir::Type getMLIRTypeFor(Symbol *symbol, bool returnMemRef = false);
 
-  llvm::Type *getLLVMTypeFor(ProgramUnit *PU, bool &hasFrameArg);
+  mlir::Type getMLIRTypeFor(ProgramUnit *PU, bool &hasFrameArg);
 
   std::string getNameForProgramUnit(ProgramUnit *PU);
 
-  llvm::GlobalValue::LinkageTypes getLinkageTypeFor(ProgramUnit *PU);
-
-  llvm::Function *emitDeclarationFor(ProgramUnit *sub);
+  bool emitDeclarationFor(ProgramUnit *sub) { return true; }
 
   std::string getFunctionNameForSymbol(Symbol *symbol);
 
@@ -101,25 +105,22 @@ public:
 
   SymbolList getUsedSymbolsInChildren();
 
-  llvm::StructType *getLLVMStructTypeFor(llvm::StringRef name, SymbolSet &set);
-
   SubPUHelper *getSubPUHelper(ProgramUnit *PU);
 
   ProgramUnit *getCalledProgramUnit(Symbol *symbol);
 
-  llvm::Type *getLLVMTypeForDynArray(fc::ArrayType *arrTy);
-
   std::string getEmittedNameForPU(std::string name);
 
-  llvm::Value *getReturnValueFor(std::string fun);
+  mlir::Value getReturnValueFor(std::string fun);
 
-  llvm::Function *getMallocFunction();
+  void createSubPUHelper(ProgramUnit *PU);
 
-  llvm::Function *getFreeFunction();
+  unsigned getSizeForType(fc::Type *Ty);
 
-  unsigned getSizeForType(Type *Ty);
-
-  llvm::Value *getSExt(llvm::Value *V);
+  std::string getTempUniqueName() {
+    static int count = 0;
+    return "cg_temp." + std::to_string(count++);
+  }
 };
 } // namespace fc
 

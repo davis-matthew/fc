@@ -48,8 +48,6 @@ protected:
       : Stmt(exprType, loc, true), type(ty), Context(ty->getContext()) {}
 
 public:
-  virtual std::string dump(llvm::raw_ostream &OS, int level = 0) const = 0;
-
   virtual Type *getType() const { return type; }
 
   void setType(Type *ty) { type = ty; }
@@ -91,7 +89,7 @@ public:
 // The part within (/ and /) of an array-constructor
 class ACSpec : public Expr {
 public:
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   inline Expr *getValue(unsigned I) { return static_cast<Expr *>(operands[I]); }
 
@@ -122,7 +120,7 @@ protected:
 public:
   ACSpec *getSpec() const { return static_cast<ACSpec *>(operands[0]); }
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   constexpr static bool classof(const Stmt *expr) {
     return expr->getStmtType() == ArrayConstructorKind;
@@ -151,7 +149,7 @@ public:
     return expr->getStmtType() == ConstantValKind;
   }
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   Expr *clone() override {
     return new (Context, alignof(ConstantVal))
@@ -180,7 +178,7 @@ public:
 
   inline BinaryOpKind getOpKind() { return opKind; }
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   ~BinaryExpr() {
     delete operands[0];
@@ -217,7 +215,7 @@ class QuadExpr : public Expr {
 public:
   void setOperand(Expr *expr, unsigned I) { operands[I] = expr; }
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   ~QuadExpr() {}
 
@@ -288,7 +286,7 @@ public:
     return expr->getStmtType() == IOImpliedDoKind;
   }
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 };
 
 // Level4 Expression
@@ -304,7 +302,7 @@ public:
 
   inline RelationalOpKind getOpKind() { return opKind; }
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   ~RelationalExpr() {}
 
@@ -344,7 +342,7 @@ public:
 
   inline LogicalOpKind getOpKind() { return opKind; }
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   ~LogicalExpr() {}
 
@@ -399,7 +397,7 @@ public:
         ObjectName(this->getSymbol(), this->getSourceLoc());
   }
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   ~ObjectName() {}
 };
@@ -469,7 +467,7 @@ public:
         StructureComponent(partRefs, getType(), getSourceLoc());
   }
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   ~StructureComponent() {}
 };
@@ -496,7 +494,7 @@ public:
 
   Type *getElementType() const;
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   inline Expr *getSubsExpr(unsigned I) const {
     return static_cast<Expr *>(getOperand(I + 1));
@@ -551,7 +549,7 @@ public:
 
   inline Expr *getExpr() const { return static_cast<Expr *>(operands[0]); }
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   ~AssignmentExpr() {}
 
@@ -578,7 +576,7 @@ protected:
 public:
   inline Expr *getExpr() const { return static_cast<Expr *>(operands[0]); }
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   ~CastExpr() {}
 
@@ -599,7 +597,7 @@ public:
     return (d->getStmtType() == RangeExprKind);
   }
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   inline Expr *getLowerBound() const { return getOperand(0); }
 
@@ -647,7 +645,7 @@ public:
 
   void setSymbol(Symbol *sym) { symbol = sym; }
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   virtual Type *getType() const override;
 
@@ -774,7 +772,7 @@ public:
 
   ~FunctionReference() {}
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   inline Symbol *getSymbol() const { return sym; }
 
@@ -811,7 +809,7 @@ public:
 
   ~Format() {}
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   inline Expr *getStringFormat(unsigned i) const {
     return static_cast<ConstantVal *>(getOperand(i));

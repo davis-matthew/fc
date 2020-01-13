@@ -21,393 +21,80 @@
 // CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
 #include "AST/Statements.h"
+#include "AST/StmtOpenMP.h"
 #include "AST/SymbolTable.h"
 #include "AST/Type.h"
 #include "codegen/CGASTHelper.h"
 #include "codegen/CodeGen.h"
-#include "codegen/LLVMUtil.h"
-#include "codegen/RuntimeHelper.h"
 #include "common/Debug.h"
-
-#include "llvm-c/Target.h"
-#include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/Module.h"
-#include "llvm/IR/Verifier.h"
-#include "llvm/Support/ErrorHandling.h"
+#include "dialect/FCOps/FCOps.h"
+#include "mlir/Dialect/LoopOps/LoopOps.h"
+#include "llvm/Support/CommandLine.h"
 
 using namespace fc;
 using namespace ast;
 using namespace llvm;
 
-static bool isStringAssignment(Expr *lhs, Expr *rhs) {
-  auto lhsTy = lhs->getType();
-  auto rhsTy = rhs->getType();
-  if (rhsTy->isCharacterTy() && lhsTy->isArrayTy() &&
-      llvm::isa<ConstantVal>(rhs))
-    return true;
+// TODO: Works only for full range array section.
+bool CodeGen::emitArraySectionStore(Expr *lhs, Expr *rhs,
+                                    mlir::Location mlirloc) {
 
-  // Should be a char array section as all other are expanded!
-  if (llvm::isa<ArraySection>(lhs) && llvm::isa<ArraySection>(rhs))
-    return true;
+  auto lhsArrSec = llvm::dyn_cast<ArraySection>(lhs);
+  // auto rhsArrSec = llvm::dyn_cast<ArraySection>(rhs);
 
-  return false;
-}
+  assert(lhsArrSec);
 
-// Currently we are freeing the memory location.
-bool CodeGen::emitDeAllocateStmt(DeAllocateStmt *stmt) {
-  SymbolList list = stmt->getDeAllocateObjList();
-  assert(!list.empty());
+  // only full range is handled for now.
+  // assert(rhsArrSec && lhsArrSec->isFullRange() && rhsArrSec->isFullRange());
 
-  auto freeFn = cgHelper->getFreeFunction();
-  auto zero = IRB->getInt64(0);
-  auto one = IRB->getInt64(1);
-  auto stat = stmt->getStat();
-  llvm::Value *statValue = nullptr;
-  if (stat) {
-    statValue = emitExpression(stat, true);
-  }
-  for (unsigned i = 0; i < list.size(); ++i) {
-
-    auto sym = list[i]->getOrigSymbol();
-    auto arrayTy = llvm::dyn_cast<ArrayType>(sym->getType());
-    assert(arrayTy);
-    assert(arrayTy->isDynArrayTy());
-    // the pointer is at 0th offset. So we can directly use alloca
-    auto Alloca = context.getLLVMValueFor(sym->getName());
-    llvm::Value *Ptr =
-        IRB->CreateBitCast(Alloca, IRB->getInt8PtrTy()->getPointerTo());
-    Ptr = IRB->CreateLoad(Ptr);
-    IRB->CreateCall(freeFn, {Ptr});
-
-    if (std == Standard::f77) {
-      if (sym->getAllocKind() == fc::AllocationKind::StaticLocal) {
-        context.functionAllocMap[context.symbolMap[sym->getName()]] = false;
-      }
-    }
-
-    // Mark as unallocated
-    if (std != Standard::f77) {
-      auto isAllocated = IRB->CreateStructGEP(nullptr, Alloca, 2, "flag");
-      emitStoreInstruction(IRB->getFalse(), isAllocated, true);
-    }
-
-    auto numDims = arrayTy->getNumDims();
-
-    auto DimArr = IRB->CreateStructGEP(nullptr, Alloca, 1, "dimsArr");
-    for (unsigned j = 0; j < numDims; ++j) {
-      auto Dim = IRB->CreateInBoundsGEP(
-          DimArr, {IRB->getInt32(0), IRB->getInt32(j)}, "dim");
-
-      auto LB = IRB->CreateStructGEP(nullptr, Dim, 0, "lb");
-      emitStructStoreInst(one, LB, Dim, Dim->getType(), 0);
-
-      auto UB = IRB->CreateStructGEP(nullptr, Dim, 1, "ub");
-      emitStructStoreInst(zero, UB, Dim, Dim->getType(), 1);
-
-      auto Size = IRB->CreateStructGEP(nullptr, Dim, 2, "size");
-      emitStructStoreInst(zero, Size, Dim, Dim->getType(), 2);
-    }
-  }
-
-  // FIXME : Free doesn't return anything. Currently storing success value as 0
-  if (statValue) {
-    emitStoreInstruction(
-        ConstantInt::get(statValue->getType()->getPointerElementType(), 0),
-        statValue);
-  }
-  return true;
-}
-
-bool CodeGen::emitNullifyStmt(NullifyStmt *nullifyStmt) {
-  for (Stmt *stmt : nullifyStmt->getOperands()) {
-    Expr *expr = static_cast<Expr *>(stmt);
-
-    llvm::Value *dest;
-    if (auto objName = llvm::dyn_cast<ObjectName>(expr)) {
-      dest = context.getLLVMValueFor(objName->getName());
-    } else {
-      dest = emitExpression(expr, /* isLHS = */ true);
-    }
-
-    assert(dest);
-    llvm::PointerType *destType =
-        llvm::dyn_cast<llvm::PointerType>(dest->getType());
-    assert(destType);
-    emitStoreInstruction(
-        llvm::Constant::getNullValue(destType->getElementType()), dest,
-        /* disableTBAA = */ true);
-  }
-
-  return true;
-}
-
-bool CodeGen::emitAllocateStmt(AllocateStmt *stmt) {
-  SymbolList list = stmt->getAllocateObjList();
-  assert(!list.empty());
-
-  auto mallocFn = cgHelper->getMallocFunction();
-
-  auto stat = stmt->getStat();
-  llvm::Value *statValue = nullptr;
-  llvm::Value *zero = nullptr;
-  llvm::Value *one = nullptr;
-  if (stat) {
-    statValue = emitExpression(stat, true);
-    zero = llvm::ConstantInt::get(statValue->getType()->getPointerElementType(),
-                                  0);
-    one = llvm::ConstantInt::get(statValue->getType()->getPointerElementType(),
-                                 1);
-  }
-  for (unsigned i = 0; i < list.size(); ++i) {
-    auto Alloca = context.getLLVMValueFor(list[i]->getName());
-    auto arraySpec = stmt->getAllocateShape(i);
-
-    // Mark as allocated
-    if (std != Standard::f77) {
-      auto isAllocated = IRB->CreateStructGEP(nullptr, Alloca, 2, "flag");
-      emitStoreInstruction(IRB->getTrue(), isAllocated, true);
-    }
-
-    unsigned numBounds = arraySpec->getNumBounds();
-    llvm::SmallVector<llvm::Value *, 2> sizesList;
-
-    llvm::Value *DimArr = nullptr;
-    if (std != Standard::f77)
-      DimArr = IRB->CreateStructGEP(nullptr, Alloca, 1, "dimsArr");
-
-    for (unsigned j = 0; j < numBounds; ++j) {
-
-      llvm::Value *Dim = nullptr;
-      if (std != Standard::f77) {
-        // Store the size, ubound, lbound of each dimension
-        Dim = IRB->CreateInBoundsGEP(
-            DimArr, {IRB->getInt32(0), IRB->getInt32(j)}, "dim");
-      }
-
-      auto fcBounds = arraySpec->getBounds(j);
-      auto lower = cgHelper->getSExt(emitExpression(fcBounds.first));
-      auto upper = cgHelper->getSExt(emitExpression(fcBounds.second));
-      auto size = IRB->CreateSub(upper, lower, "size");
-      size = IRB->CreateAdd(size, IRB->getInt64(1));
-      sizesList.push_back(size);
-
-      if (std != Standard::f77) {
-        auto LB = IRB->CreateStructGEP(nullptr, Dim, 0, "lb");
-        // IRB->CreateStore(lower, LB);
-        emitStructStoreInst(lower, LB, Dim, Dim->getType(), 0);
-
-        auto UB = IRB->CreateStructGEP(nullptr, Dim, 1, "ub");
-        // IRB->CreateStore(upper, UB);
-        emitStructStoreInst(upper, UB, Dim, Dim->getType(), 1);
-
-        auto Size = IRB->CreateStructGEP(nullptr, Dim, 2, "size");
-        // IRB->CreateStore(size, Size);
-        emitStructStoreInst(size, Size, Dim, Dim->getType(), 2);
-      }
-    }
-
-    // Calculate number of elements
-    llvm::Value *finalSize = nullptr;
-    for (auto size : sizesList) {
-      if (!finalSize) {
-        finalSize = size;
-        continue;
-      }
-      finalSize = IRB->CreateMul(size, finalSize, "alloc.size.calc");
-    }
-
-    if (finalSize->getType() == IRB->getInt32Ty())
-      finalSize = IRB->CreateSExt(finalSize, IRB->getInt64Ty());
-
-    llvm::Value *Base = nullptr;
-    if (std != Standard::f77) {
-      Base = IRB->CreateStructGEP(nullptr, Alloca, 0, "base");
-    }
-
-    auto fcArrayTy =
-        llvm::dyn_cast<ArrayType>(list[0]->getOrigSymbol()->getType());
-    assert(fcArrayTy);
-
-    unsigned elementSize = cgHelper->getSizeForType(fcArrayTy->getElementTy());
-
-    auto valuePtr =
-        cgHelper->getLLVMTypeFor(fcArrayTy->getElementTy())->getPointerTo();
-
-    auto sizeVal = IRB->getInt64(elementSize);
-
-    // Number of bytes to allocate
-    finalSize = IRB->CreateMul(sizeVal, finalSize, "alloc.finalsize");
-
-    llvm::Value *malloc = IRB->CreateCall(mallocFn, {finalSize});
-    if (statValue) {
-      auto icmp = IRB->CreateIsNotNull(malloc, "isnull");
-      auto select = IRB->CreateSelect(icmp, zero, one);
-      if (i == 0)
-        emitStoreInstruction(select, statValue);
-      else {
-        // Should overall status. Do or with existing value
-        auto lastStat = emitLoadInstruction(statValue, "statValue");
-        auto orValue = IRB->CreateOr(select, lastStat);
-        emitStoreInstruction(orValue, statValue);
-      }
-    }
-
-    malloc = IRB->CreateBitCast(malloc, valuePtr, list[i]->getName());
-
-    if (std != Standard::f77) {
-      // Store the size to pointer
-      // emitStoreInstruction(malloc, Base);
-      emitStructStoreInst(malloc, Base, Alloca, Alloca->getType(), 0);
-    } else {
-      context.symbolMap[list[i]->getName()] = malloc;
-    }
-
-    if (std == Standard::f77) {
-      auto sym = list[i]->getOrigSymbol();
-      if (sym->getAllocKind() == fc::AllocationKind::StaticLocal) {
-        context.functionAllocMap[malloc] = true;
-      }
-    }
-  }
-  return true;
-}
-
-bool CodeGen::emitAssignment(llvm::Value *lhsVal, llvm::Value *rhsVal) {
-
-  llvm::PointerType *rhsPtrTy = dyn_cast<llvm::PointerType>(rhsVal->getType());
-  llvm::PointerType *lhsPtrTy = dyn_cast<llvm::PointerType>(lhsVal->getType());
-
-  if (!lhsPtrTy || !rhsPtrTy) {
-    emitStoreInstruction(rhsVal, lhsVal);
-    return true;
-  }
-
-  auto ArrTy = dyn_cast<llvm::ArrayType>(lhsPtrTy->getElementType());
-  auto rhsArrTy = dyn_cast<llvm::ArrayType>(rhsPtrTy->getElementType());
-
-  if (!ArrTy && !rhsArrTy) {
-    llvm_unreachable("Unknown assignment kind");
-  }
-
-  llvm::ArrayType *arrayType = ArrTy ? ArrTy : rhsArrTy;
-
-  assert(arrayType->getElementType()->isIntegerTy(8));
-
-  unsigned length = arrayType->getArrayNumElements();
-  unsigned size =
-      length * (arrayType->getElementType()->getScalarSizeInBits() / 8);
-
-  llvm::Value *destPtr, *srcPtr;
-
-  if (ArrTy)
-    destPtr =
-        IRB->CreateInBoundsGEP(lhsVal, {IRB->getInt32(0), IRB->getInt32(0)});
-  else
-    destPtr = lhsVal;
-
-  if (rhsArrTy)
-    srcPtr =
-        IRB->CreateInBoundsGEP(rhsVal, {IRB->getInt32(0), IRB->getInt32(0)});
-  else
-    srcPtr = rhsVal;
-
-  assert(length);
-  // TODO: Handle alignment.
-  IRB->CreateMemCpy(
-      destPtr, destPtr->getPointerAlignment(TheModule->getDataLayout()), srcPtr,
-      srcPtr->getPointerAlignment(TheModule->getDataLayout()), size);
+  auto rhsVal = emitExpression(rhs);
+  auto lhsVal = emitExpression(lhs, true);
+  builder.create<FC::FCStoreOp>(mlirloc, rhsVal, lhsVal);
   return true;
 }
 
 bool CodeGen::emitAssignment(AssignmentStmt *stmt) {
   auto rhs = stmt->getRHS();
   auto lhs = stmt->getLHS();
+  auto mlirloc = getLoc(rhs->getSourceLoc());
+
+  if (llvm::isa<ArraySection>(lhs)) {
+    return emitArraySectionStore(lhs, rhs, mlirloc);
+  }
+
   auto rhsVal = emitExpression(rhs);
+
+  if (rhsVal.getType().isa<mlir::IndexType>() &&
+      Type::getCoreElementType(lhs->getType())->isInt32Ty()) {
+    rhsVal = builder.create<mlir::IndexCastOp>(
+        mlirloc, rhsVal, mlir::IntegerType::get(32, &mlirContext));
+  }
+  if (auto arrEle = llvm::dyn_cast<ArrayElement>(lhs)) {
+    auto Alloca = context.symbolMap[arrEle->getSymbol()->getName()];
+    assert(Alloca);
+    FC::SubscriptRangeList subs;
+    for (auto sub : arrEle->getSubscriptList()) {
+      auto tempSub = emitExpression(sub);
+      subs.push_back(FC::SubscriptRange(castToIndex(tempSub)));
+    }
+    auto storeOp = builder.create<FC::FCStoreOp>(getLoc(stmt->getSourceLoc()),
+                                                 rhsVal, Alloca, subs);
+    storeOp.setAttr("name",
+                    builder.getStringAttr(arrEle->getSymbol()->getName()));
+    return true;
+  }
+
   auto lhsVal = emitExpression(lhs, true);
   assert(lhsVal);
 
-  // Since we are emititing strcat, result is already copied to LHS.
-  // op1 of binary expr is already copied to LHS in sema
-  if (auto expr = llvm::dyn_cast<BinaryExpr>(rhs)) {
-    if (expr->getOpKind() == BinaryOpKind::Concat) {
-      return true;
-    }
+  auto storeOp = builder.create<FC::FCStoreOp>(getLoc(stmt->getSourceLoc()),
+                                               rhsVal, lhsVal);
+  if (auto objName = dyn_cast<ObjectName>(lhs)) {
+    storeOp.setAttr("name", builder.getStringAttr(objName->getName()));
   }
 
-  if (isStringAssignment(lhs, rhs)) {
-    auto Fn = runtimeHelper->getStrCpyFunction();
-    llvm::Value *arg1 = IRB->CreateBitCast(lhsVal, IRB->getInt8PtrTy());
-    llvm::Value *arg2 = IRB->CreateBitCast(rhsVal, IRB->getInt8PtrTy());
-    IRB->CreateCall(Fn, {arg1, arg2});
-    return true;
-  }
-
-  return emitAssignment(lhsVal, rhsVal);
-}
-
-bool CodeGen::emitPointerAssignment(PointerAssignmentStmt *stmt) {
-  auto lhs = stmt->getLHS();
-  auto rhs = stmt->getRHS();
-  llvm::Value *lhsVal = nullptr;
-  llvm::Value *rhsVal = nullptr;
-
-  auto getValForPtrAssign = [&](Expr *expr, bool isLHS) {
-    // This works only for structure-component members that are ObjectName. This
-    // will fail for array-section. TODO: A structure-component can inherently
-    // be an object-name, array-element, array-section etc. Once we deduce it,
-    // we should be able to reuse the non-pointer analagous APIs for these.
-    // Currently emitExpression() differentiates struct-comp with other
-    // designators since they are different Exprs, and this makes things messy.
-    // Should we bring back the Designator class ?
-    if (auto structComp = llvm::dyn_cast<StructureComponent>(expr)) {
-      return emitStructureComponent(structComp, isLHS);
-
-    } else if (auto obj = llvm::dyn_cast<ObjectName>(expr)) {
-      if (obj->getSymbol()->getOrigSymbol()->getType()->isPointerTy() && !isLHS)
-        return emitExpression(obj, true);
-      return context.getLLVMValueFor(
-          obj->getSymbol()->getOrigSymbol()->getName());
-
-    } else {
-      return static_cast<llvm::Value *>(nullptr);
-    }
-  };
-
-  lhsVal = getValForPtrAssign(lhs, true);
-  rhsVal = getValForPtrAssign(rhs, false);
-
-  if (lhsVal && rhsVal) {
-    emitStoreInstruction(rhsVal, lhsVal, /* disableTBAA = */ true);
-    return true;
-  }
-
-  ArraySection *lhsArrSec, *rhsArrSec;
-  if ((lhsArrSec = llvm::dyn_cast<ArraySection>(lhs)) &&
-      (rhsArrSec = llvm::dyn_cast<ArraySection>(rhs))) {
-    Symbol *lhsSym = lhsArrSec->getSymbol()->getOrigSymbol();
-    Symbol *rhsSym = rhsArrSec->getSymbol()->getOrigSymbol();
-
-    lhsVal = context.getLLVMValueFor(lhsSym->getName());
-
-    auto lhsPtrTy = llvm::dyn_cast<fc::PointerType>(lhsSym->getType());
-    assert(lhsPtrTy);
-    auto lhsTy = llvm::dyn_cast<fc::ArrayType>(lhsPtrTy->getElementType());
-
-    auto rhsTy = llvm::dyn_cast<fc::ArrayType>(rhsSym->getType());
-
-    assert(lhsTy && rhsTy); // supporting only rhs as array cases for now
-
-    rhsVal = getDynamicArrayFor(context.getLLVMValueFor(rhsSym->getName()),
-                                rhsTy, lhsTy);
-
-    assert(lhsVal && rhsVal);
-    emitStoreInstruction(rhsVal, lhsVal, /* disableTBAA = */ true);
-    return true;
-  }
-
-  llvm_unreachable("unhandled pointer assignment");
+  return true;
 }
 
 static bool isLhs(Expr *expr) {
@@ -427,52 +114,41 @@ static bool isLhs(Expr *expr) {
   return false;
 }
 
-// Emit the print statement. Make a call to the
-// runtime print routine.
+// Emits fc.print
 bool CodeGen::emitPrintStmt(PrintStmt *stmt) {
-
   if (stmt->getNumOperands() == 0)
     return true;
+  llvm::SmallVector<mlir::Value, 2> exprValList;
+  auto mlirloc = getLoc(stmt->getSourceLoc());
 
-  bool isLHS;
-  auto printFn = runtimeHelper->getPrintFunction();
-  llvm::SmallVector<llvm::Value *, 2> exprValList;
+  llvm::BitVector isString;
   for (auto stmt : stmt->getOperands()) {
     auto expr = llvm::dyn_cast<Expr>(stmt);
     assert(expr);
-    isLHS = isLhs(expr);
-    auto exprVal = emitExpression(expr, isLHS);
+    isString.push_back(expr->getType()->isStringArrTy());
+    mlir::Value exprVal = nullptr;
+    exprVal = emitExpression(expr, isLhs(expr));
     assert(exprVal);
-    auto *arrDimSize = getArrDimSizeVal(expr, exprVal);
-
-    bool isDynArray = false;
-
-    if (expr->getType()->isDynArrayTy()) {
-      isDynArray = true;
-    } else if (auto ptrTy = llvm::dyn_cast<fc::PointerType>(expr->getType())) {
-      if (ptrTy->getElementType()->isArrayTy())
-        isDynArray = true;
-    }
-
-    runtimeHelper->fillPrintArgsFor(exprVal, exprValList, arrDimSize, IRB,
-                                    isDynArray);
+    exprValList.push_back(exprVal);
   }
-  exprValList.insert(exprValList.begin(), IRB->getInt32(exprValList.size()));
 
-  // Create call now.
-  auto printCall = IRB->CreateCall(printFn, exprValList);
-  return (printCall != nullptr);
+  auto printOp = builder.create<FC::PrintOp>(mlirloc, exprValList);
+  // String needs better handling.
+  printOp.setAttr("arg_info", FC::StringInfoAttr::get(&mlirContext, isString));
+
+  return true;
 }
 
 bool CodeGen::emitInternalWriteStmt(WriteStmt *stmt) {
   auto unit = stmt->getUnit();
   auto iostat = stmt->getIostat();
-  llvm::Value *iostatValue = nullptr;
-  llvm::Value *zero = nullptr;
+  mlir::Location mlirloc = getLoc(stmt->getSourceLoc());
+  mlir::Value iostatValue = nullptr;
+  mlir::Value zero = nullptr;
+
   if (iostat) {
     iostatValue = emitExpression(iostat, true);
-    zero = llvm::ConstantInt::get(
-        iostatValue->getType()->getPointerElementType(), 0);
+    zero = builder.create<mlir::ConstantIntOp>(mlirloc, 0, 32);
   }
 
   ArrayType *arrayTy = llvm::dyn_cast<ArrayType>(unit->getType());
@@ -484,6 +160,7 @@ bool CodeGen::emitInternalWriteStmt(WriteStmt *stmt) {
     return false;
 
   ExprList exprList = stmt->getExprList();
+
   if (exprList.size() == 1) {
     auto expr = exprList[0];
     if (!expr->getType()->isIntegralTy()) {
@@ -493,114 +170,96 @@ bool CodeGen::emitInternalWriteStmt(WriteStmt *stmt) {
     assert(expr->getType()->isIntegralTy());
     auto exprVal = emitExpression(expr, false);
     auto unitExpr = emitExpression(unit, true);
-    unitExpr = IRB->CreateBitCast(unitExpr, IRB->getInt8PtrTy());
-    auto Fn = runtimeHelper->getIntToStringFunction();
-    auto call = IRB->CreateCall(Fn, {unitExpr, exprVal});
-    assert(call);
+    builder.create<FC::ItoSOp>(mlirloc, unitExpr, exprVal);
 
     // Currently storing zero.
     if (iostatValue) {
-      emitStoreInstruction(zero, iostatValue);
+      builder.create<mlir::StoreOp>(mlirloc, zero, iostatValue);
     }
     return true;
   }
 
   bool isLHS;
-  auto sprintfFn = runtimeHelper->getSprintfFunction();
-  llvm::SmallVector<llvm::Value *, 2> exprValList;
-
+  llvm::BitVector isString;
+  llvm::SmallVector<mlir::Value, 2> exprValList;
   for (auto expr : exprList) {
     assert(expr);
     isLHS = isLhs(expr);
     auto exprVal = emitExpression(expr, isLHS);
     assert(exprVal);
-
-    auto *arrDimSize = getArrDimSizeVal(expr, exprVal);
-
-    bool isDynArray = false;
-
-    if (expr->getType()->isDynArrayTy()) {
-      isDynArray = true;
-    } else if (auto ptrTy = llvm::dyn_cast<fc::PointerType>(expr->getType())) {
-      if (ptrTy->getElementType()->isArrayTy())
-        isDynArray = true;
-    }
-
-    runtimeHelper->fillPrintArgsFor(exprVal, exprValList, arrDimSize, IRB,
-                                    isDynArray);
+    exprValList.push_back(exprVal);
+    isString.push_back(expr->getType()->isStringArrTy());
   }
 
   auto unitExpr = emitExpression(unit, true);
-  unitExpr = IRB->CreateBitCast(unitExpr, IRB->getInt8PtrTy());
-  exprValList.insert(exprValList.begin(), unitExpr);
-  exprValList.insert(exprValList.begin(),
-                     IRB->getInt32(exprValList.size() - 1));
-
-  IRB->CreateCall(sprintfFn, exprValList);
+  auto sprintfOp =
+      builder.create<FC::SprintfOp>(mlirloc, unitExpr, exprValList);
+  sprintfOp.setAttr("arg_info",
+                    FC::StringInfoAttr::get(&mlirContext, isString));
 
   // Currently storing zero.
   if (iostatValue) {
-    emitStoreInstruction(zero, iostatValue);
+    builder.create<mlir::StoreOp>(mlirloc, zero, iostatValue);
   }
   return true;
 }
 
-// Emit write statement
-bool CodeGen::emitWriteStmt(WriteStmt *stmt) {
-
-  if (stmt->getNumOperands() == 0)
+bool CodeGen::emitWriteStmt(WriteStmt *writeStmt) {
+  if (writeStmt->getNumOperands() == 0)
     return true;
 
-  auto unitExpr = stmt->getUnit();
-  llvm::Value *unit;
-  bool fileWrite = false;
+  llvm::SmallVector<mlir::Value, 2> exprValList;
+  mlir::Location mlirloc = getLoc(writeStmt->getSourceLoc());
 
-  if (unitExpr) {
-    if (emitInternalWriteStmt(stmt))
+  mlir::Value unitVal = nullptr;
+
+  // TODO: what should we do about iostat?
+  // how to handle spaceList ?
+
+  if (writeStmt->getUnit())
+    if (emitInternalWriteStmt(writeStmt))
       return true;
 
-    fileWrite = true;
-    unit = emitExpression(unitExpr);
+  if (Expr *unit = writeStmt->getUnit()) {
+    unitVal = emitExpression(unit);
+  } else {
+    unitVal = builder.create<mlir::ConstantIntOp>(mlirloc, 6, 32);
   }
 
-  assert(!stmt->getIostat() && "IOstat for normal write is not handled");
-
-  llvm::Function *writeFn;
-  if (fileWrite)
-    writeFn = runtimeHelper->getFileWriteFunction();
-  else
-    writeFn = runtimeHelper->getWriteFunction();
-
-  llvm::SmallVector<llvm::Value *, 2> exprValList;
   llvm::SmallVector<int, 2> spaceList;
-  stmt->getSpaceList(spaceList);
-  unsigned k = 0;
-  assert(spaceList.size() == stmt->getExprList().size());
+  writeStmt->getSpaceList(spaceList);
+  assert(spaceList.size() == writeStmt->getExprList().size());
 
-  for (auto expr : stmt->getExprList()) {
-    auto exprVal = emitExpression(expr);
-    bool isString = false;
+  llvm::BitVector isString;
+  for (fc::Expr *expr : writeStmt->getExprList()) {
+    mlir::Value exprVal = nullptr;
+    bool stringType = false;
     auto ArrTy = dyn_cast<ArrayType>(expr->getType());
-    if (ArrTy && ArrTy->getElementTy()->isStringCharTy())
-      isString = true;
+    if (ArrTy && ArrTy->getElementTy()->isStringCharTy()) {
+      stringType = true;
+    }
+    if (isa<fc::ArraySection>(expr))
+      exprVal = emitExpression(expr, true);
+    else
+      exprVal = emitExpression(expr);
     assert(exprVal);
-    auto numSpaces = IRB->getInt32(spaceList[k++]);
-    exprValList.push_back(numSpaces);
-    auto *arrDimSize = getArrDimSizeVal(expr, exprVal);
-    runtimeHelper->fillPrintArgsFor(exprVal, exprValList, arrDimSize, IRB,
-                                    isString);
+    if (exprVal.getType().isInteger(8))
+      stringType = false;
+    isString.push_back(stringType);
+    exprValList.push_back(exprVal);
   }
-  exprValList.insert(exprValList.begin(), IRB->getInt32(exprValList.size()));
 
-  if (fileWrite)
-    exprValList.insert(exprValList.begin(), unit);
+  auto writeOp = builder.create<FC::WriteOp>(mlirloc, unitVal, exprValList);
+  writeOp.setAttr("arg_info", FC::StringInfoAttr::get(&mlirContext, isString));
+  writeOp.setAttr("space_list", builder.getI32ArrayAttr(spaceList));
 
-  auto writeCall = IRB->CreateCall(writeFn, exprValList);
-  return (writeCall != nullptr);
+  return true;
 }
 
 bool CodeGen::emitInternalReadStmt(ReadStmt *stmt) {
   auto unit = stmt->getUnit();
+  if (!unit)
+    return false;
   ArrayType *arrayTy = llvm::dyn_cast<ArrayType>(unit->getType());
   if (!arrayTy)
     return false;
@@ -610,19 +269,19 @@ bool CodeGen::emitInternalReadStmt(ReadStmt *stmt) {
 
   ExprList exprList = stmt->getExprList();
   assert(exprList.size() == 1);
+  auto mlirLoc = getLoc(stmt->getSourceLoc());
 
   auto expr = exprList[0];
+  auto exprVal = emitExpression(expr, true);
+  assert(exprVal);
+  auto unitExpr = emitExpression(unit, true);
+  assert(unitExpr);
 
   // TODO Handle more generically.
   //      Remove duplicate code
   if (auto arraySec = llvm::dyn_cast<ArraySection>(expr)) {
     assert(arraySec->isFullRange());
-    auto exprVal = emitExpression(exprList[0], true);
-    exprVal = IRB->CreateBitCast(exprVal, IRB->getInt32Ty()->getPointerTo());
-    auto unitExpr = emitExpression(unit, true);
-    unitExpr = IRB->CreateBitCast(unitExpr, IRB->getInt8PtrTy());
-    auto Fn = runtimeHelper->getStringToIntArrayFunction();
-    IRB->CreateCall(Fn, {unitExpr, exprVal});
+    builder.create<FC::StoIAOp>(mlirLoc, unitExpr, exprVal);
     return true;
   }
 
@@ -633,240 +292,358 @@ bool CodeGen::emitInternalReadStmt(ReadStmt *stmt) {
       llvm_unreachable("Not handled");
   }
 
-  auto exprVal = emitExpression(exprList[0], true);
-  auto unitExpr = emitExpression(unit, true);
-  unitExpr = IRB->CreateBitCast(unitExpr, IRB->getInt8PtrTy());
-  auto Fn = runtimeHelper->getStringToIntFunction();
-  auto call = IRB->CreateCall(Fn, {unitExpr});
-  emitStoreInstruction(call, exprVal);
+  auto I32 = mlir::IntegerType::get(32, &mlirContext);
+  auto stoi = builder.create<FC::StoIOp>(mlirLoc, I32, unitExpr);
+  builder.create<FC::FCStoreOp>(mlirLoc, stoi.getResult(), exprVal);
+  // assert(stoi);
   return true;
 }
 
-// Emit read statement, emit call to runtime function
-bool CodeGen::emitReadStmt(ReadStmt *stmt) {
-
-  if (stmt->getNumOperands() == 0)
+bool CodeGen::emitReadStmt(ReadStmt *readStmt) {
+  if (readStmt->getNumOperands() == 0)
     return true;
 
-  auto unitExpr = stmt->getUnit();
-  llvm::Value *unit;
-  bool fileRead = false;
-  if (unitExpr) {
-    // auto unitConstVal = llvm::dyn_cast<ConstantVal>(unitExpr);
-    if (emitInternalReadStmt(stmt))
-      return true;
-    unit = emitExpression(unitExpr);
-    fileRead = true;
-  }
-  llvm::Function *readFn;
-  if (fileRead)
-    readFn = runtimeHelper->getFileReadFunction();
-  else
-    readFn = runtimeHelper->getReadFunction();
+  if (emitInternalReadStmt(readStmt))
+    return true;
 
-  llvm::SmallVector<llvm::Value *, 2> exprValList;
-  for (auto expr : stmt->getExprList()) {
-    auto exprVal = emitExpression(expr, true);
-    bool isString = false;
-    auto ArrTy = dyn_cast<ArrayType>(expr->getType());
-    if (ArrTy && ArrTy->getElementTy()->isStringCharTy())
-      isString = true;
-    assert(exprVal);
-    auto *arrDimSize = getArrDimSizeVal(expr, exprVal);
-    runtimeHelper->fillReadArgsFor(exprVal, exprValList, arrDimSize, IRB,
-                                   isString);
-  }
-  exprValList.insert(exprValList.begin(), IRB->getInt32(exprValList.size()));
+  llvm::SmallVector<mlir::Value, 2> exprValList;
+  mlir::Location mlirloc = getLoc(readStmt->getSourceLoc());
 
-  llvm::Value *statValue = nullptr;
-  if (auto iostat = stmt->getIostat()) {
-    statValue = emitExpression(iostat, true);
-  }
+  mlir::Value unitVal = nullptr;
 
-  if (fileRead)
-    exprValList.insert(exprValList.begin(), unit);
-
-  auto readCall = IRB->CreateCall(readFn, exprValList);
-  if (statValue) {
-    emitStoreInstruction(readCall, statValue);
-  }
-
-  return (readCall != nullptr);
-}
-
-// emit open-stmt
-bool CodeGen::emitOpenStmt(OpenStmt *stmt) {
-  auto unitExpr = stmt->getUnit();
-  auto fileExpr = stmt->getFile();
-
-  auto fileName = emitExpression(fileExpr);
-  auto unit = emitExpression(unitExpr);
-
-  auto openFn = runtimeHelper->getOpenFunction();
-  llvm::SmallVector<llvm::Value *, 2> argsList;
-  runtimeHelper->fillOpenArgsFor(unit, fileName, argsList, IRB);
-
-  llvm::Value *openCall = IRB->CreateCall(openFn, argsList);
-  assert(openCall);
-
-  if (auto iostat = stmt->getIostat()) {
-    auto statValue = emitExpression(iostat, true);
-    assert(statValue);
-    openCall = IRB->CreateIntCast(openCall,
-                                  statValue->getType()->getPointerElementType(),
-                                  /*isSigned*/ true);
-    emitStoreInstruction(openCall, statValue);
-  }
-  return true;
-}
-
-bool CodeGen::emitCloseStmt(CloseStmt *stmt) {
-  auto unitExpr = stmt->getUnit();
-  auto unit = emitExpression(unitExpr);
-  auto closeFn = runtimeHelper->getCloseFunction();
-  llvm::Value *closeCall = IRB->CreateCall(closeFn, {unit});
-
-  if (auto iostat = stmt->getIostat()) {
-    auto statValue = emitExpression(iostat, true);
-    assert(statValue);
-    closeCall = IRB->CreateIntCast(
-        closeCall, statValue->getType()->getPointerElementType(),
-        /*isSigned*/ true);
-    emitStoreInstruction(closeCall, statValue);
-  }
-
-  return true;
-}
-
-bool CodeGen::emitStopStmt(StopStmt *stmt) {
-  auto stopCode = stmt->getStopCode();
-  auto currFn = context.currFn;
-  // assert(stopCode->getType()->isIntegralTy() && "Expecting integer expr");
-  if (stopCode) {
-    auto stopVal = emitExpression(stopCode);
-    IRB->CreateRet(stopVal);
+  // TODO: what should we do about iostat?
+  if (Expr *unit = readStmt->getUnit()) {
+    unitVal = emitExpression(unit);
   } else {
-    auto Ty = currFn->getReturnType();
-    if (Ty->isVoidTy()) {
-      IRB->CreateRetVoid();
-    } else {
-      IRB->CreateRet(llvm::Constant::getNullValue(Ty));
+    unitVal = builder.create<mlir::ConstantIntOp>(mlirloc, 5, 32);
+  }
+
+  llvm::BitVector isString;
+  for (fc::Expr *expr : readStmt->getExprList()) {
+    isString.push_back(expr->getType()->isStringArrTy());
+    mlir::Value exprVal = emitExpression(expr, /* isLHS */ true);
+    assert(exprVal);
+    exprValList.push_back(exprVal);
+  }
+
+  auto I32 = mlir::IntegerType::get(32, theModule->getContext());
+  auto readOp = builder.create<FC::ReadOp>(mlirloc, I32, unitVal, exprValList);
+  readOp.setAttr("arg_info", FC::StringInfoAttr::get(&mlirContext, isString));
+
+  if (auto iostat = readStmt->getIostat()) {
+    auto statValue = emitExpression(iostat, true);
+    assert(statValue);
+    builder.create<FC::FCStoreOp>(mlirloc, readOp.getResult(), statValue);
+  }
+
+  return true;
+}
+
+bool CodeGen::emitCloseStmt(CloseStmt *closeStmt) {
+  auto unitExpr = closeStmt->getUnit();
+  auto unit = emitExpression(unitExpr);
+  assert(unit);
+  auto I32 = mlir::IntegerType::get(32, theModule->getContext());
+  mlir::Location mlirloc = getLoc(closeStmt->getSourceLoc());
+  auto closeOp = builder.create<FC::CloseOp>(mlirloc, I32, unit);
+  assert(closeOp);
+
+  if (auto iostat = closeStmt->getIostat()) {
+    auto statValue = emitExpression(iostat, true);
+    assert(statValue);
+    builder.create<FC::FCStoreOp>(mlirloc, closeOp.getResult(), statValue);
+  }
+  return true;
+}
+
+bool CodeGen::emitOpenStmt(OpenStmt *openStmt) {
+  if (openStmt->getNumOperands() == 0)
+    return true;
+
+  llvm::SmallVector<mlir::Value, 2> exprValList;
+  mlir::Location mlirloc = getLoc(openStmt->getSourceLoc());
+
+  Expr *file = openStmt->getFile();
+  Expr *unit = openStmt->getUnit();
+  assert(file && unit);
+
+  mlir::Value unitVal = emitExpression(unit);
+  mlir::Value fileVal = emitExpression(file, /* isLHS */ true);
+
+  auto I32 = mlir::IntegerType::get(32, theModule->getContext());
+
+  auto openOp = builder.create<FC::OpenOp>(mlirloc, I32, unitVal, fileVal);
+  assert(openOp);
+
+  if (auto iostat = openStmt->getIostat()) {
+    auto statValue = emitExpression(iostat, true);
+    assert(statValue);
+    builder.create<FC::FCStoreOp>(mlirloc, openOp.getResult(), statValue);
+  }
+  return true;
+}
+
+// loop.if representation of if-else statements.
+bool CodeGen::emitLoopIfOperation(IfElseStmt *stmt) {
+
+  auto &kindList = stmt->getKindList();
+  auto insertPt = builder.saveInsertionPoint();
+  auto numClauses = stmt->getNumOperands();
+  // There is no else-if in loop.if.
+  // which is handled using nested loop.if inside else region.
+  for (unsigned i = 0; i < numClauses; i++) {
+    auto ifPair = stmt->getIfStmt(i);
+    assert(ifPair);
+    auto expr = ifPair->getCondition();
+    auto block = ifPair->getBlock();
+    assert(block);
+    mlir::Value exprVal = nullptr;
+
+    // Emit the final else.
+    if (kindList[i] == IfConstructKind::ElseKind) {
+      assert(i == numClauses - 1);
+      assert(!expr);
+      emitExectubaleConstructList(block->getStmtList());
+      break;
+    }
+
+    exprVal = emitExpression(expr);
+    bool hasElse = i != numClauses - 1;
+    auto ifOp = builder.create<mlir::loop::IfOp>(getLoc(stmt->getSourceLoc()),
+                                                 exprVal, hasElse);
+    // Emit code for if block.
+    auto thenBlock = ifOp.getThenBodyBuilder().getBlock();
+    builder.setInsertionPointToStart(thenBlock);
+    emitExectubaleConstructList(block->getStmtList());
+
+    // Prepare for else block.
+    if (hasElse) {
+      auto elseBlock = ifOp.getElseBodyBuilder().getBlock();
+      builder.setInsertionPointToStart(elseBlock);
     }
   }
-  auto newBlock = getNewBlock("deadBlock", true);
-  IRB->SetInsertPoint(newBlock);
+
+  builder.restoreInsertionPoint(insertPt);
   return true;
 }
 
 bool CodeGen::emitIfElseStmt(IfElseStmt *stmt) {
+
+  // Thi is inside the structure loop like operation.
+  if (context.currRegion) {
+    return emitLoopIfOperation(stmt);
+  }
+
   auto &kindList = stmt->getKindList();
-  auto ExitBB = BasicBlock::Create(*LLContext, "if.exit");
+  auto ExitBB = context.currFn.addBlock();
 
   for (unsigned i = 0; i < stmt->getNumOperands(); i++) {
     auto ifPair = stmt->getIfStmt(i);
     auto expr = ifPair->getCondition();
     auto block = ifPair->getBlock();
-    llvm::Value *exprVal = nullptr;
-    auto ThenBB = BasicBlock::Create(*LLContext, "if.then", context.currFn);
-    llvm::BasicBlock *ElseBlock = nullptr;
+    mlir::Value exprVal = nullptr;
+    auto ThenBB = getNewBlock(ExitBB);
+    mlir::Block *ElseBlock = nullptr;
     if (kindList[i] != IfConstructKind::ElseKind) {
       exprVal = emitExpression(expr);
       ElseBlock = ExitBB;
       if (i != stmt->getNumOperands() - 1) {
-        ElseBlock = BasicBlock::Create(*LLContext, "else");
+        ElseBlock = getNewBlock(ExitBB);
       }
-      IRB->CreateCondBr(exprVal, ThenBB, ElseBlock);
+      SmallVector<mlir::Value, 2> e1, e2;
+      builder.create<mlir::CondBranchOp>(getLoc(stmt->getSourceLoc()), exprVal,
+                                         ThenBB, e1, ElseBlock, e2);
     } else {
-      IRB->CreateBr(ThenBB);
+      builder.create<mlir::BranchOp>(getLoc(stmt->getSourceLoc()), ThenBB);
       ElseBlock = ExitBB;
     }
 
     // Emit code for if block.
     context.currBB = ThenBB;
-    IRB->SetInsertPoint(ThenBB);
+    builder.setInsertionPointToEnd(ThenBB);
     // Emit the block statements.
     emitExectubaleConstructList(block->getStmtList());
     /// Add the terminator for the then block.
-    IRB->CreateBr(ExitBB);
+    builder.create<mlir::BranchOp>(getLoc(stmt->getSourceLoc()), ExitBB);
 
     // Set the current BB to else block (regular block)
     context.currBB = ElseBlock;
-    ElseBlock->insertInto(context.currFn);
-    IRB->SetInsertPoint(ElseBlock);
+    builder.setInsertionPointToEnd(ElseBlock);
   }
   return true;
 }
 
-// Emit LLVM canonical unrotated loop!
-bool CodeGen::emitDoWhileStmt(DoWhileStmt *stmt) {
+mlir::Operation *CodeGen::handleCmdLineArgs(Symbol *symbol,
+                                            ExprList &argsList) {
+  assert(symbol->getName() == "get_command_argument");
+  assert(argsList.size() == 2);
+  auto pos = emitExpression(argsList[0]);
+  auto mlirloc = pos.getLoc();
+  auto var = emitExpression(argsList[1], true);
+  return builder.create<FC::ArgvOp>(mlirloc, pos, var);
+}
+
+mlir::Value CodeGen::castToIndex(mlir::Value v) {
+  if (!v || v.getType().isa<mlir::IndexType>() ||
+      v.isa<mlir::BlockArgument>()) {
+    return v;
+  }
+  auto op = v.getDefiningOp();
+  if (auto constVal = dyn_cast_or_null<mlir::ConstantIntOp>(op)) {
+    auto returnVal =
+        builder.create<ConstantIndexOp>(v.getLoc(), constVal.getValue());
+    op->replaceAllUsesWith(returnVal);
+    op->erase();
+    return returnVal;
+  }
+  return builder.create<mlir::IndexCastOp>(v.getLoc(), v,
+                                           builder.getIndexType());
+}
+
+bool CodeGen::emitFCDoWhileLoop(DoWhileStmt *stmt) {
   auto expr = stmt->getLogicalExpr();
+  auto mlirloc = getLoc(stmt->getSourceLoc());
 
   // Create a new block for logical header emission.
-  auto Header = BasicBlock::Create(*LLContext, "for.header", context.currFn);
+  auto Header = context.currFn.addBlock();
 
-  auto Body = BasicBlock::Create(*LLContext, "for.body", context.currFn);
-  auto Exit = BasicBlock::Create(*LLContext, "for.exit");
+  auto Body = getNewBlock(Header);
+  auto Exit = getNewBlock(Header);
 
   // Create direct br.
-  IRB->CreateBr(Header);
+  builder.create<mlir::BranchOp>(mlirloc, Header);
 
   context.currBB = Header;
-  IRB->SetInsertPoint(Header);
+  builder.setInsertionPointToEnd(Header);
 
   // Emit loop condition expression in Header.
   auto exprVal = emitExpression(expr);
-  IRB->CreateCondBr(exprVal, Body, Exit);
+  SmallVector<mlir::Value, 2> e1, e2;
+  builder.create<mlir::CondBranchOp>(mlirloc, exprVal, Body, e1, Exit, e2);
 
   // Emit code for loop body.
   context.currBB = Body;
-  IRB->SetInsertPoint(Body);
+  builder.setInsertionPointToEnd(Body);
 
   // Emit the block statements.
   emitExectubaleConstructList(stmt->getBlock()->getStmtList());
 
   // Create backedge to Header from body.
-  IRB->CreateBr(Header);
+  builder.create<mlir::BranchOp>(mlirloc, Header);
 
   // Set the current BB to exit block (regular block)
   context.currBB = Exit;
-  Exit->insertInto(context.currFn);
-  IRB->SetInsertPoint(Exit);
+  builder.setInsertionPointToEnd(Exit);
   return true;
 }
 
-bool CodeGen::emitDoStmt(DoStmt *stmt) {
-  if (stmt->isParallel()) {
-    context.isParallelLoop = true;
+bool CodeGen::emitFCDoLoop(DoStmt *stmt) {
+  auto oldRegion = context.currRegion;
+  auto expr = stmt->getQuadExpr();
+  auto mlirloc = getLoc(stmt->getSourceLoc());
+  auto attr = builder.getStringAttr(stmt->getName());
+
+  // Create a simple do loop without any expression.
+  if (!expr) {
+    auto forop = builder.create<FC::DoOp>(mlirloc, attr);
+    context.currRegion = &forop.region();
+    auto block = forop.getBody();
+    builder.setInsertionPointToStart(block);
+    // context.currLoopVector.push_back(CGLoop(stmt->getName()));
+    if (!emitExectubaleConstructList(stmt->getBlock()->getStmtList())) {
+      return false;
+    }
+    builder.setInsertionPointAfter(forop);
+    context.currRegion = oldRegion;
+    return true;
   }
+
+  // set dovar value to init.
+  auto indVarsymbol =
+      dyn_cast<fc::ObjectName>(expr->getOperand(0))->getSymbol();
+
+  auto indvar = context.symbolMap[indVarsymbol->getName()];
+  auto ivTy = cgHelper->getMLIRTypeFor(indVarsymbol->getType());
+  auto initVal = emitExpression(expr->getOperand(1));
+  auto endVal = emitExpression(expr->getOperand(2));
+  auto step = emitExpression(expr->getOperand(3));
+
+  // Create fc.do op.
+  auto forop = builder.create<FC::DoOp>(mlirloc, attr, initVal, endVal, step);
+  auto block = forop.getBody();
+
+  // Replace the uses of indvar variable with SSA indvar value.
+  context.symbolMap[indVarsymbol->getName()] = block->getArgument(0);
+  context.currRegion = &forop.region();
+
+  // Start emitting the loop body.
+  builder.setInsertionPointToStart(block);
+  // context.currLoopVector.push_back(CGLoop(stmt->getName()));
+  if (!emitExectubaleConstructList(stmt->getBlock()->getStmtList())) {
+    return false;
+  }
+  // context.currLoopVector.pop_back();
+
+  // Emit at the end of loop body.
+  builder.setInsertionPointAfter(forop);
+  auto finalVal = builder.create<mlir::AddIOp>(
+      mlirloc, emitCastExpr(endVal, ivTy), emitCastExpr(step, ivTy));
+  emitStoreInstruction(finalVal, indvar);
+
+  // Restore the use of indvars back to the indvar variable instead of SSA
+  // value.
+  context.symbolMap[indVarsymbol->getName()] = indvar;
+  context.currRegion = oldRegion;
+  return true;
+}
+
+// TODO: For now, loops with cycle and exit are converted
+// to CFG based loops.
+// Loop operation with cycle/exit support is on the way.
+static bool containsIllegalStmts(fc::Block *block) {
+  for (auto stmt : *block) {
+    switch (stmt->getStmtType()) {
+    case fc::DoWhileStmtKind:
+    case fc::CycleStmtKind:
+    case fc::ExitStmtKind:
+      return true;
+    case fc::DoStmtKind: {
+      auto doStmt = static_cast<DoStmt *>(stmt);
+      if (!doStmt->getQuadExpr() || containsIllegalStmts(doStmt->getBlock()))
+        return true;
+      break;
+    }
+    case fc::IfElseStmtKind: {
+      auto ifStmt = static_cast<IfElseStmt *>(stmt);
+      auto numClauses = ifStmt->getNumOperands();
+      for (unsigned i = 0; i < numClauses; i++) {
+        auto ifPair = ifStmt->getIfStmt(i);
+        assert(ifPair);
+        if (containsIllegalStmts(ifPair->getBlock()))
+          return true;
+      }
+    }
+    default:
+      break;
+    }
+  }
+  return false;
+}
+
+bool CodeGen::emitDoStmt(DoStmt *stmt) {
+  if (stmt->getQuadExpr() && !containsIllegalStmts(stmt->getBlock()))
+    return emitFCDoLoop(stmt);
 
   auto expr = stmt->getQuadExpr();
 
-  // Block to do bounds calculation.
-  // auto BoundsBB = getNewBlock("for.bounds", true);
-
-  // Redirect current to bounds block.
-  // IRB->CreateBr(BoundsBB);
-
-  // We need to calculate runtime trip count for
-  // the do loop as it may contain dynamic start,end and
-  // increment values.
-  // Note that there is no logical condition given
-  // by the user to end the loop.
-  // Hence for do i = L,U,S, we calculate the trip count
-  // by doing ((U - L +S) /S) calculation in the for.bounds
-  // block.
-
-  // context.currBB = BoundsBB;
-  // IRB->SetInsertPoint(BoundsBB);
-
-  llvm::Value *tripCount = nullptr;
-  AllocaInst *tripIndVar = nullptr;
-  llvm::Value *doVar = nullptr;
-  llvm::Value *stepVal = nullptr;
+  mlir::Value tripCount = nullptr;
+  mlir::Value tripIndVar = nullptr;
+  mlir::Value doVar = nullptr;
+  mlir::Value stepVal = nullptr;
   bool IncrIsOne = false;
-  llvm::Value *initVal = nullptr, *endVal = nullptr;
+  mlir::Value initVal = nullptr, endVal = nullptr;
+  mlir::Type doTy;
   if (expr) {
-
     auto incrExpr = expr->getOperand(3);
     if (auto constVal = llvm::dyn_cast<ConstantVal>(incrExpr)) {
       if (constVal->getInt() == 1) {
@@ -876,367 +653,361 @@ bool CodeGen::emitDoStmt(DoStmt *stmt) {
 
     // set dovar value to init.
     doVar = emitExpression(expr->getOperand(0), true);
+    doTy = cgHelper->getMLIRTypeFor(expr->getOperand(0)->getType());
     initVal = emitExpression(expr->getOperand(1));
     stepVal = emitExpression(expr->getOperand(3));
     endVal = emitExpression(expr->getOperand(2));
 
     // set tripIndVar to zero.
     if (!IncrIsOne) {
-      auto Zero = llvm::ConstantInt::get(initVal->getType(), 0);
+      auto Zero = builder.create<mlir::ConstantIndexOp>(initVal.getLoc(), 0);
 
-      tripIndVar = createAlloca(initVal->getType(), "tripIndVar");
-      emitStoreInstruction(Zero, tripIndVar);
+      tripIndVar =
+          createAlloca(FC::RefType::get((initVal.getType())), "tripIndVar")
+              .getResult();
+      emitStoreInstruction(emitCastExpr(Zero, initVal.getType()), tripIndVar);
 
-      auto UMinusB = IRB->CreateSub(endVal, initVal, "UMinusB");
-      auto PlusS = IRB->CreateAdd(UMinusB, stepVal, "UminusBplusS");
-      tripCount = IRB->CreateSDiv(PlusS, stepVal, "tripCountVal");
+      auto loc = doVar.getLoc();
+      auto UMinusB = builder.create<mlir::SubIOp>(loc, endVal, initVal);
+      auto PlusS = builder.create<mlir::AddIOp>(loc, UMinusB, stepVal);
+      tripCount = builder.create<mlir::SignedDivIOp>(loc, PlusS, stepVal);
     }
 
-    emitStoreInstruction(initVal, doVar);
+    emitStoreInstruction(emitCastExpr(initVal, doTy), doVar);
   }
 
+  auto ExitBB = context.currFn.addBlock();
+
   // Create Header where loop comparison happens.
-  auto Header = getNewBlock("for.header", true);
+  auto Header = getNewBlock(ExitBB);
 
   // Body, where the loop block sits.
-  auto BodyBB = getNewBlock("for.body", true);
-
-  // Exit block for the loop.
-  auto ExitBB = getNewBlock("for.exit");
+  auto BodyBB = getNewBlock(ExitBB);
 
   // Block where indvar increments happen.
-  auto LatchBB = getNewBlock("for.latch");
+  auto LatchBB = getNewBlock(ExitBB);
 
-  CGLoop *cgLoop = new CGLoop(Header, LatchBB, ExitBB, stmt->getName());
+  fc::CGLoop *cgLoop = new CGLoop(Header, LatchBB, ExitBB, stmt->getName());
   context.currLoopVector.push_back(cgLoop);
   context.stmtLoopMap[stmt] = cgLoop;
   if (!stmt->getName().empty())
     context.nameLoopMap[stmt->getName()] = cgLoop;
 
   // Redirect to header.
-  IRB->CreateBr(Header);
+  builder.create<mlir::BranchOp>(getLoc(stmt->getSourceLoc()), Header);
 
   context.currBB = Header;
-  IRB->SetInsertPoint(Header);
+  builder.setInsertionPointToEnd(Header);
 
   if (expr) {
-    llvm::Value *LoopCmp = nullptr;
+    mlir::Value LoopCmp = nullptr;
+    auto loc = getLoc(stmt->getSourceLoc());
     if (!IncrIsOne) {
       auto indVarVal = emitLoadInstruction(tripIndVar, "tripIndVar.load");
       // Now emit trip count condition.
-      LoopCmp = IRB->CreateICmpSLT(indVarVal, tripCount, "cmpIndvar");
+      LoopCmp = builder.create<mlir::CmpIOp>(loc, mlir::CmpIPredicate::slt,
+                                             indVarVal, tripCount);
     } else {
-      auto doVarLoad = emitLoadInstruction(doVar, "doVar.load");
-      auto finalVal = IRB->CreateAdd(endVal, IRB->getInt32(1));
-      LoopCmp = IRB->CreateICmpSLT(doVarLoad, finalVal, "cmpDoVar");
+      mlir::Value doVarLoad = emitLoadInstruction(doVar, "doVar.load");
+      auto One = builder.create<mlir::ConstantIndexOp>(loc, 1);
+      mlir::Value finalVal = builder.create<mlir::AddIOp>(
+          loc, endVal, emitCastExpr(One, endVal.getType()));
+      if (doVarLoad.getType() != finalVal.getType()) {
+        doVarLoad = emitCastExpr(doVarLoad, finalVal.getType());
+      }
+      LoopCmp = builder.create<mlir::CmpIOp>(loc, mlir::CmpIPredicate::slt,
+                                             doVarLoad, finalVal);
     }
 
-    IRB->CreateCondBr(LoopCmp, BodyBB, ExitBB);
+    SmallVector<mlir::Value, 2> e1, e2;
+    builder.create<mlir::CondBranchOp>(getLoc(stmt->getSourceLoc()), LoopCmp,
+                                       BodyBB, e1, ExitBB, e2);
 
   } else {
-    IRB->CreateBr(BodyBB);
+    builder.create<mlir::BranchOp>(getLoc(stmt->getSourceLoc()), BodyBB);
   }
 
   // Emit Loop body now.
   context.currBB = BodyBB;
-  IRB->SetInsertPoint(BodyBB);
+  builder.setInsertionPointToEnd(BodyBB);
 
   // Emit the block statements.
   emitExectubaleConstructList(stmt->getBlock()->getStmtList());
 
-  IRB->CreateBr(LatchBB);
+  builder.create<mlir::BranchOp>(getLoc(stmt->getSourceLoc()), LatchBB);
 
   // After the loop body emission, set the current loop to null.
   context.currLoopVector.pop_back();
 
   // Emit Loop latch now.
-  LatchBB->insertInto(context.currFn);
   context.currBB = LatchBB;
-  IRB->SetInsertPoint(LatchBB);
+  builder.setInsertionPointToEnd(LatchBB);
 
   // Increment doVar by step.
   if (expr) {
-    auto doVarLoad = emitLoadInstruction(doVar, "doVar.load");
-    auto doVarInc = IRB->CreateAdd(doVarLoad, stepVal, "doVar.incr");
-    emitStoreInstruction(doVarInc, doVar);
+    auto doVarLoad = emitLoadInstruction(doVar, "doVar.load").getResult();
+    auto doVarInc =
+        builder.create<mlir::AddIOp>(doVarLoad.getLoc(), doVarLoad, stepVal);
+    emitStoreInstruction(emitCastExpr(doVarInc, doTy), doVar);
 
     if (!IncrIsOne) {
       // Increment tripIndVar by 1.
-      auto One = llvm::ConstantInt::get(tripCount->getType(), 1);
-      auto indVarLoad = emitLoadInstruction(tripIndVar, "indvar.load");
-      auto indVarInc = IRB->CreateAdd(indVarLoad, One, "doVar.incr");
+      auto One = builder.create<mlir::ConstantIntOp>(
+          doVarLoad.getLoc(), 1, endVal.getType().getIntOrFloatBitWidth());
+      auto indVarLoad =
+          emitLoadInstruction(tripIndVar, "indvar.load").getResult();
+      auto indVarInc =
+          builder.create<mlir::AddIOp>(doVarLoad.getLoc(), indVarLoad, One);
       emitStoreInstruction(indVarInc, tripIndVar);
     }
   }
 
   // Loop back edge to Header.
-  auto backEdge = IRB->CreateBr(Header);
-  if (context.isParallelLoop) {
-    llvm::Metadata *MDList[] = {
-        llvm::MDString::get(*LLContext, "llvm.loop.vectorize.enable"),
-        llvm::ConstantAsMetadata::get(IRB->getTrue())};
-
-    MDNode *LoopID = MDNode::get(*LLContext, MDList);
-    backEdge->setMetadata(llvm::LLVMContext::MD_loop, LoopID);
-  }
+  builder.create<mlir::BranchOp>(getLoc(stmt->getSourceLoc()), Header);
 
   // Now set continue IR dumping in Exit.
-  ExitBB->insertInto(context.currFn);
-
   context.currBB = ExitBB;
-  IRB->SetInsertPoint(ExitBB);
-
-  context.isParallelLoop = false;
-
-  return true;
-}
-
-bool CodeGen::emitMemCpy(CallStmt *stmt) {
-  auto dest = emitExpression(stmt->getExpr(0));
-  auto destAlloca = llvm::dyn_cast<llvm::AllocaInst>(dest);
-  auto source = emitExpression(stmt->getExpr(1));
-  auto sourceAlloca = llvm::dyn_cast<llvm::AllocaInst>(source);
-
-  auto sourceSec = llvm::dyn_cast<ArraySection>(stmt->getExpr(0));
-  auto destSec = llvm::dyn_cast<ArraySection>(stmt->getExpr(1));
-  assert(sourceSec);
-  assert(destSec);
-
-  auto sourceTy = sourceAlloca->getType();
-  auto destTy = destAlloca->getAllocatedType();
-
-  assert(sourceTy && destTy);
-
-  if (sourceTy->isStructTy()) {
-    auto structPtr = source;
-    source = IRB->CreateStructGEP(nullptr, source, 0, "source.base");
-    source = emitStructLoadInst(source, structPtr, structPtr->getType(), 0,
-                                "source.load");
-  }
-
-  if (destTy->isStructTy()) {
-    auto structPtr = dest;
-    dest = IRB->CreateStructGEP(nullptr, dest, 0, "dest.base");
-    dest = emitStructLoadInst(dest, structPtr, structPtr->getType(), 0,
-                              "dest.base");
-    // dest = emitLoadInstruction(dest, "dest.load");
-  }
-
-  auto numElement = emitExpression(stmt->getExpr(2));
-  IRB->CreateMemCpy(
-      dest, dest->getPointerAlignment(TheModule->getDataLayout()), source,
-      source->getPointerAlignment(TheModule->getDataLayout()), numElement);
+  builder.setInsertionPointToEnd(ExitBB);
   return true;
 }
 
 bool CodeGen::emitCallStmt(CallStmt *stmt) {
   auto symbol = stmt->getCalledFn();
   symbol = symbol->getOrigSymbol();
-  auto fcFuncTy = llvm::dyn_cast<fc::FunctionType>(symbol->getType());
-  if (!fcFuncTy) {
-    llvm_unreachable("Called symbol is not a function.");
-  }
   auto argsList = stmt->getArgsList();
-  if (symbol->getName() == "memcpy") {
-    return emitMemCpy(stmt);
-  }
-
-  if (symbol->getName() == "get_command_argument") {
-    assert(stmt->getNumOperands() == 2);
-    auto pos = emitExpression(stmt->getExpr(0));
-    auto var = emitExpression(stmt->getExpr(1), true);
-    auto argvBase = emitLoadInstruction(context.ArgV);
-    auto argvGEP = IRB->CreateInBoundsGEP(argvBase, {pos}, "argv.load");
-
-    llvm::Value *argvFinal = emitLoadInstruction(argvGEP);
-
-    auto arrayType = llvm::dyn_cast<ArrayType>(stmt->getExpr(1)->getType());
-    assert(arrayType && !arrayType->isDynArrayTy());
-    auto list = arrayType->getBoundsList();
-    assert(list.size() == 1);
-    unsigned size = list[0].second - list[0].first + 1;
-    IRB->CreateMemCpy(
-        var, var->getPointerAlignment(TheModule->getDataLayout()), argvFinal,
-        argvFinal->getPointerAlignment(TheModule->getDataLayout()), size);
-
-    // TODO Use whichever more appropriate
-    /*
-    auto Fn = runtimeHelper->getStrCpyFunction();
-    llvm::Value *val = IRB->CreateBitCast(var, IRB->getInt8PtrTy());
-    IRB->CreateCall(Fn, {val, argvFinal});
-    */
-    return true;
-  }
-  if (symbol->getName() == "trim") {
-    assert(stmt->getNumOperands() == 1);
-    auto arg1 = emitExpression(argsList[0], true);
-    auto castVal = IRB->CreateBitCast(arg1, IRB->getInt8PtrTy());
-
-    auto arg1Ty = arg1->getType()->getPointerElementType();
-    assert(arg1Ty && arg1Ty->isArrayTy());
-    auto arrTy = cast<llvm::ArrayType>(arg1Ty);
-    assert(arrTy->getElementType()->isSingleValueType());
-    auto size = arrTy->getNumElements();
-
-    auto llvmFuncTy = llvm::FunctionType::get(
-        IRB->getVoidTy(), {castVal->getType(), IRB->getInt32Ty()}, false);
-    auto trimFunc = cast<llvm::Function>(
-        TheModule->getOrInsertFunction("__fc_runtime_trim", llvmFuncTy));
-    trimFunc->addFnAttr(llvm::Attribute::ArgMemOnly);
-    return IRB->CreateCall(trimFunc, {castVal, IRB->getInt32(size)});
-  }
-
-  if (symbol->getName() == "system_clock") {
-    assert(stmt->getNumOperands() == 3);
-    SmallVector<llvm::Value *, 2> funcArgsList;
-    bool isInt = true;
-    for (unsigned i = 0; i < argsList.size(); ++i) {
-      auto assignmentExpr = llvm::dyn_cast<AssignmentExpr>(argsList[i]);
-      if (!assignmentExpr->getExpr()->getType()->isIntegralTy())
-        isInt = false;
-      assert(assignmentExpr);
-      funcArgsList.push_back(emitExpression(assignmentExpr->getExpr(), true));
-    }
-
-    // Currently only handling int
-    assert(isInt);
-    auto Fn = runtimeHelper->getISysClockFunction();
-    IRB->CreateCall(Fn, funcArgsList);
-    return true;
-  }
   return emitCall(symbol, argsList, true);
 }
 
-llvm::CallInst *CodeGen::emitCall(Symbol *symbol, ExprList &list,
-                                  bool isSubroutineCall) {
+mlir::Operation *CodeGen::emitTrimCall(Symbol *symbol, ExprList &argsList) {
+  assert(symbol->getName() == "trim");
+  assert(argsList.size() == 1);
+  auto arg = emitExpression(argsList[0], true);
+  return builder.create<FC::TrimOp>(arg.getLoc(), arg);
+}
+
+// TODO: This should have been handled at AST level.
+// cleanup the code.
+mlir::Operation *CodeGen::handleMemCopyCall(Symbol *symbol,
+                                            ExprList &argsList) {
+  FC::FCCallOp Op;
+  assert(symbol->getName() == "memcpy");
+  assert(argsList.size() == 3);
+
+  auto dst = emitExpression(argsList[0], true);
+  auto src = emitExpression(argsList[1]);
+
+  auto dstType = dst.getType().cast<FC::RefType>();
+  assert(dstType.getEleTy().isa<FC::ArrayType>());
+  assert(src.getType().isa<FC::ArrayType>());
+
+  return builder.create<FC::FCStoreOp>(dst.getLoc(), src, dst);
+}
+
+FC::FCFuncOp
+CodeGen::getMLIRFuncOpFor(Symbol *calledSymbol, ProgramUnit *calledPU,
+                          llvm::SmallVectorImpl<mlir::Value> &argList) {
+
+  auto name = cgHelper->getFunctionNameForSymbol(calledSymbol);
+  FC::FCFuncOp mlirFunc;
+  auto mlirloc = getLoc(calledSymbol->getSourceLoc());
+
+  auto symref = getSymbolScopeList(calledSymbol);
+  auto op = getOpForSymRef(symref);
+  if (auto funcOp = llvm::dyn_cast_or_null<FC::FCFuncOp>(op)) {
+    return funcOp;
+  }
+
+  llvm::SmallVector<mlir::Type, 2> argTys;
+  for (auto arg : argList) {
+    argTys.push_back(arg.getType());
+  }
+  auto funcType = cgHelper->getMLIRTypeFor(calledSymbol->getType())
+                      .cast<mlir::FunctionType>();
+  auto mlirFuncType = mlir::FunctionType::get(argTys, funcType.getResults(),
+                                              theModule->getContext());
+
+  mlirFunc = FC::FCFuncOp::create(mlirloc, name, mlirFuncType);
+
+  if (calledPU && calledPU->isNestedUnit()) {
+    context.currFn.addNestedFunction(mlirFunc);
+  } else if (symref.getRootReference() == symref.getLeafReference()) {
+    theModule->push_back(mlirFunc);
+  }
+  return mlirFunc;
+}
+
+mlir::Operation *CodeGen::emitCall(Symbol *symbol, ExprList &argsList,
+                                   bool isSubroutineCall) {
+  FC::FCCallOp op;
+  if (symbol->getName() == "trim") {
+    return emitTrimCall(symbol, argsList);
+  }
+  if (symbol->getName() == "memcpy") {
+    return handleMemCopyCall(symbol, argsList);
+  }
+
+  if (symbol->getName() == "get_command_argument") {
+    return handleCmdLineArgs(symbol, argsList);
+  }
+
   auto fcFuncTy = llvm::dyn_cast<fc::FunctionType>(symbol->getType());
   if (!fcFuncTy) {
     llvm_unreachable("Called symbol is not a function.");
   }
-  auto PU = cgHelper->getCalledProgramUnit(symbol);
-  auto fnName = cgHelper->getFunctionNameForSymbol(symbol);
 
-  bool isUndeclaredFn =
-      fcFuncTy == fc::FunctionType::getUndeclaredFuncTy(fcFuncTy->getContext());
-
-  llvm::Function *LLFunction = nullptr;
-  if (!PU) {
-    if (isSubroutineCall && isUndeclaredFn) {
-      fcFuncTy =
-          fc::FunctionType::getVoidUndeclaredFuncTy(fcFuncTy->getContext());
-    }
-    auto FuncTy =
-        static_cast<llvm::FunctionType *>(cgHelper->getLLVMTypeFor(fcFuncTy));
-
-    LLFunction = TheModule->getFunction(fnName);
-    if (!LLFunction)
-      LLFunction = static_cast<llvm::Function *>(
-          TheModule->getOrInsertFunction(fnName, FuncTy));
-  } else {
-    LLFunction = TheModule->getFunction(fnName);
-  }
-
-  // Function is in same module and yet to be emitted
-  // We emit a declaration in this case
-  if (!LLFunction) {
-    auto FuncTy =
-        static_cast<llvm::FunctionType *>(cgHelper->getLLVMTypeFor(fcFuncTy));
-
-    LLFunction = static_cast<llvm::Function *>(
-        TheModule->getOrInsertFunction(fnName, FuncTy));
-  }
-
-  /*
-  if (!LLFunction) {
-    error() << "\n looking for function : " << fnName;
-    llvm_unreachable("\nCould not find the llvm Function in CallStmt\n");
-    return nullptr;
-  }
-  */
-
-  llvm::SmallVector<llvm::Value *, 2> InitArgsList, ArgsList;
-
-  for (auto expr : list) {
-    auto exprVal = emitExpression(expr, true);
-    InitArgsList.push_back(exprVal);
-  }
-
-  bool hasFrameArg = false;
-
-  // If the current function has a parent PU and if it has
-  // a frame arg, add that to the current arg list.
-  if (PU && PU->isNestedUnit()) {
-    auto helper = cgHelper->getSubPUHelper(PU->getParent());
-    if (helper && helper->hasFrameArg) {
-      if (PU->getParent() != context.currPU) {
-        llvm::Argument *arg = &*context.currFn->args().begin();
-        assert(arg);
-        assert(arg->getType()->isPointerTy());
-        assert(arg->getType()->getPointerElementType() == helper->frameTy);
-        ArgsList.push_back(arg);
-      } else {
-        auto frameName = "FRAME." + context.currPU->getName().str();
-        auto val = context.getLLVMValueFor(frameName);
-        assert(val);
-        ArgsList.push_back(val);
+  llvm::SmallVector<mlir::Value, 2> funcArgList;
+  for (auto arg : llvm::enumerate(argsList)) {
+    auto argVal = emitExpression(arg.value(), true);
+    if (!argVal.getType().isa<FC::RefType>()) {
+      if (argVal.getType().isIndex()) {
+        // TODO: hard coded.
+        argVal = emitCastExpr(argVal, builder.getIntegerType(32));
       }
-      hasFrameArg = true;
+      auto tempName = cgHelper->getTempUniqueName();
+      auto memRefTy = FC::RefType::get(argVal.getType());
+      auto alloc = createAlloca(memRefTy, tempName);
+      auto loc = argVal.getLoc();
+      auto storeOp = builder.create<FC::FCStoreOp>(loc, argVal, alloc);
+      storeOp.setAttr("name", builder.getStringAttr(tempName));
+      funcArgList.push_back(alloc);
+      continue;
+    }
+
+    if (fcFuncTy->getArgType(0)->isVarArgTy()) {
+      funcArgList.push_back(argVal);
+      continue;
+    }
+
+    auto expectedType = fcFuncTy->getArgType(arg.index());
+    auto currType = arg.value()->getType();
+    if (expectedType != currType) {
+      if (expectedType->isDynArrayTy() && currType->isArrayTy()) {
+        auto expArr = cgHelper->getMLIRTypeFor(expectedType);
+        auto ref = FC::RefType::get(expArr);
+        argVal = emitCastExpr(argVal, ref);
+      } else {
+        assert(false && "wrong argument type for call statement!");
+      }
+    }
+    funcArgList.push_back(argVal);
+  }
+
+  auto PU = cgHelper->getCalledProgramUnit(symbol);
+  auto mlirloc = getLoc(symbol->getSourceLoc());
+
+  auto mlirFunc = getMLIRFuncOpFor(symbol, PU, funcArgList);
+  assert(mlirFunc);
+
+  mlir::SymbolRefAttr attr = getSymbolScopeList(symbol);
+  return builder.create<FC::FCCallOp>(
+      mlirloc, attr, mlirFunc.getType().getResults(), funcArgList);
+}
+
+bool CodeGen::emitDeAllocateStmt(DeAllocateStmt *stmt) {
+  SymbolList list = stmt->getDeAllocateObjList();
+  auto stat = stmt->getStat();
+  assert(!list.empty());
+  auto loc = getLoc(stmt->getSourceLoc());
+
+  for (unsigned i = 0; i < list.size(); ++i) {
+
+    auto sym = list[i]->getOrigSymbol();
+    auto arrayTy = llvm::dyn_cast<ArrayType>(sym->getType());
+    assert(arrayTy);
+    assert(arrayTy->isDynArrayTy());
+
+    if (std == Standard::f77) {
+      if (sym->getAllocKind() == fc::AllocationKind::StaticLocal) {
+        context.functionAllocMap[context.symbolMap[sym->getName()]] = false;
+      }
+    }
+
+    auto val = context.getMLIRValueFor(sym->getName());
+    builder.create<FC::DeallocaOp>(loc, val);
+  }
+
+  // FIXME : Free doesn't return anything. Currently storing success value as
+  // 0
+  if (stat) {
+    auto statValue = emitExpression(stat, true);
+    auto zero = builder.create<mlir::ConstantIntOp>(loc, 0, 32);
+    builder.create<FC::FCStoreOp>(loc, zero, statValue);
+  }
+  return true;
+}
+
+bool CodeGen::emitAllocateStmt(AllocateStmt *stmt) {
+  SymbolList list = stmt->getAllocateObjList();
+  assert(!list.empty());
+  for (unsigned i = 0; i < list.size(); ++i) {
+    auto arraySpec = stmt->getAllocateShape(i);
+    auto loc = getLoc(stmt->getSourceLoc());
+    unsigned numBounds = arraySpec->getNumBounds();
+    llvm::SmallVector<mlir::Value, 2> operands;
+
+    // Collect dynamic lower and upper bounds.
+    for (unsigned j = 0; j < numBounds; ++j) {
+      auto fcBounds = arraySpec->getBounds(j);
+      auto lower = castToIndex(emitExpression(fcBounds.first));
+      operands.push_back(lower);
+      auto upper = castToIndex(emitExpression(fcBounds.second));
+      operands.push_back(upper);
+    }
+
+    auto arrType = cgHelper->getMLIRTypeFor(list[i]->getType());
+    auto arrAlloc = builder.create<FC::AllocaOp>(
+        loc, list[i]->getName(), FC::RefType::get(arrType), operands);
+    context.symbolMap[list[i]->getName()] = arrAlloc.getResult();
+    auto allocation = arrAlloc.getResult();
+
+    if (std == Standard::f77) {
+      auto sym = list[i]->getOrigSymbol();
+      if (sym->getAllocKind() == fc::AllocationKind::StaticLocal) {
+        context.functionAllocMap[allocation] = true;
+      }
     }
   }
 
-  auto FnTy = (LLFunction->getFunctionType());
-  for (unsigned I = 0; I < InitArgsList.size(); ++I) {
+  return true;
+}
 
-    auto llArgVal = InitArgsList[I];
-    auto fcCurrArgTy = list[I]->getType();
-    fc::Type *fcDummArgTy = nullptr;
-    if (!isUndeclaredFn)
-      fcDummArgTy = fcFuncTy->getArgType(I);
+// TODO:Stop statement with string expression is not being supported yet
+bool CodeGen::emitStopStmt(StopStmt *stmt) {
+  llvm::SmallVector<mlir::Type, 2> argTys;
+  llvm::SmallVector<mlir::Value, 2> funcArgList;
+  auto funcName = "__fc_runtime_stop_int";
+  mlir::Value exprVal = nullptr;
+  auto mlirloc = getLoc(stmt->getSourceLoc());
+  FC::FCFuncOp mlirFunc = nullptr;
 
-    auto currArg =
-        getArgumentFor(llArgVal, fcCurrArgTy, fcDummArgTy, LLFunction, I);
-
-    // Now do bitcast to the original actual argument of function.
-    if (!isUndeclaredFn) {
-      auto funcParamType = FnTy->getParamType(hasFrameArg ? I + 1 : I);
-      assert(currArg->getType() == funcParamType);
-    }
-    ArgsList.push_back(currArg);
-  }
-
-  unsigned totalArgs = fcFuncTy->getArgList().size();
-  // Fill null values when optinal arguments are left out
-  if (ArgsList.size() < totalArgs) {
-    for (unsigned i = ArgsList.size(); i < totalArgs; ++i) {
-      auto tempArg = llvm::Constant::getNullValue(
-          cgHelper->getLLVMTypeFor(fcFuncTy->getArgType(i))->getPointerTo());
-      ArgsList.push_back(tempArg);
-    }
-  }
-
-  llvm::CallInst *call = nullptr;
-  if (isUndeclaredFn & isSubroutineCall) {
-    llvm::SmallVector<llvm::Type *, 2> argList;
-    for (auto arg : ArgsList) {
-      argList.push_back(arg->getType());
-    }
-
-    auto actualFuncTy =
-        llvm::FunctionType::get(IRB->getVoidTy(), argList, false);
-    auto bitcastFunc =
-        IRB->CreateBitCast(LLFunction, actualFuncTy->getPointerTo());
-    call = IRB->CreateCall(bitcastFunc, ArgsList);
+  if (stmt->getStopCode() == nullptr) {
+    exprVal = builder.create<mlir::ConstantIntOp>(mlirloc, 0, 64);
+    argTys.push_back(exprVal.getType());
   } else {
-    call = IRB->CreateCall(LLFunction, ArgsList);
+    auto expr = llvm::dyn_cast<Expr>(stmt->getStopCode());
+    exprVal = emitExpression(expr);
+    argTys.push_back(exprVal.getType());
   }
-  for (unsigned I = 0; I < ArgsList.size(); ++I) {
-    call->addParamAttr(I, llvm::Attribute::NoAlias);
+  auto func = theModule->lookupSymbol(funcName);
+  if (!func) {
+    auto mlirFuncType =
+        mlir::FunctionType::get(argTys, {}, theModule->getContext());
+
+    mlirFunc = FC::FCFuncOp::create(mlirloc, funcName, mlirFuncType);
+    calledFuncs[funcName] = mlirFuncType;
+    theModule->push_back(mlirFunc);
+  } else {
+    mlirFunc = llvm::dyn_cast<FC::FCFuncOp>(func);
   }
-  return call;
+  funcArgList.push_back(exprVal);
+  builder.create<FC::FCCallOp>(getLoc(stmt->getSourceLoc()), mlirFunc,
+                               funcArgList);
+  return true;
 }
 
 bool CodeGen::emitExitStmt(ExitStmt *stmt) {
-  llvm::BasicBlock *exitBB;
+  mlir::Block *exitBB;
+  auto mlirloc = getLoc(stmt->getSourceLoc());
 
   if (stmt->hasConstructName()) {
     assert(context.nameLoopMap.find(stmt->getConstructName()) !=
@@ -1248,17 +1019,19 @@ bool CodeGen::emitExitStmt(ExitStmt *stmt) {
     exitBB = context.currLoopVector.back()->getExitBB();
   }
 
-  auto nextBB = getNewBlock("for.no.cycle", true);
-
-  IRB->CreateCondBr(IRB->getTrue(), exitBB, nextBB);
+  auto nextBB = context.currFn.addBlock();
+  SmallVector<mlir::Value, 2> e1, e2;
+  auto trueVal = builder.create<mlir::ConstantIntOp>(mlirloc, 1, 1);
+  builder.create<mlir::CondBranchOp>(mlirloc, trueVal, exitBB, e1, nextBB, e2);
 
   context.currBB = nextBB;
-  IRB->SetInsertPoint(nextBB);
+  builder.setInsertionPointToEnd(nextBB);
   return true;
 }
 
 bool CodeGen::emitCycleStmt(CycleStmt *stmt) {
-  llvm::BasicBlock *latchBB;
+  mlir::Block *latchBB;
+  auto mlirloc = getLoc(stmt->getSourceLoc());
 
   if (stmt->hasConstructName()) {
     assert(context.nameLoopMap.find(stmt->getConstructName()) !=
@@ -1270,141 +1043,15 @@ bool CodeGen::emitCycleStmt(CycleStmt *stmt) {
     latchBB = context.currLoopVector.back()->getLatchBB();
   }
 
-  auto nextBB = getNewBlock("for.no.cycle", true);
-
-  IRB->CreateCondBr(IRB->getTrue(), latchBB, nextBB);
+  auto nextBB = context.currFn.addBlock();
+  SmallVector<mlir::Value, 2> e1, e2;
+  auto trueVal = builder.create<mlir::ConstantIntOp>(mlirloc, 1, 1);
+  builder.create<mlir::CondBranchOp>(getLoc(stmt->getSourceLoc()), trueVal,
+                                     latchBB, e1, nextBB, e2);
 
   context.currBB = nextBB;
-  IRB->SetInsertPoint(nextBB);
+  builder.setInsertionPointToEnd(nextBB);
   return true;
-}
-
-llvm::Value *CodeGen::getDynamicArrayFor(llvm::Value *val,
-                                         fc::ArrayType *staticArrTy,
-                                         fc::ArrayType *dynArrTy) {
-
-  assert(!staticArrTy->boundsEmpty());
-  if (!dynArrTy) {
-    dynArrTy = fc::ArrayType::get(staticArrTy->getContext(),
-                                  staticArrTy->getElementTy(),
-                                  staticArrTy->getNumDims());
-  }
-
-  auto StructTy = cgHelper->getLLVMTypeFor(dynArrTy);
-  assert(StructTy);
-
-  auto NewVal = createAlloca(StructTy, val->getName().str() + ".dynamic");
-
-  // Store the base pointer.
-  auto name = val->getName();
-  auto baseTy = StructTy->getContainedType(0);
-  auto BC = IRB->CreateBitCast(val, baseTy);
-  auto basePtr = IRB->CreateStructGEP(nullptr, NewVal, 0, name + ".base");
-  // emitStoreInstruction(BC, basePtr);
-  emitStructStoreInst(BC, basePtr, NewVal, NewVal->getType(), 0);
-  // Now store the dims.
-  auto dimsArr = IRB->CreateStructGEP(nullptr, NewVal, 1, name + ".dimsArr");
-
-  unsigned I = 0;
-  for (auto bounds : staticArrTy->getBoundsList()) {
-    auto Dim = IRB->CreateInBoundsGEP(
-        dimsArr, {IRB->getInt32(0), IRB->getInt32(I)}, name + ".dim");
-
-    auto LB = IRB->CreateStructGEP(nullptr, Dim, 0, name + ".lb");
-    // emitStoreInstruction(IRB->getInt64(bounds.first), LB);
-    emitStructStoreInst(IRB->getInt64(bounds.first), LB, Dim, Dim->getType(),
-                        0);
-
-    auto UB = IRB->CreateStructGEP(nullptr, Dim, 1, name + ".ub");
-    // emitStoreInstruction(IRB->getInt64(bounds.second), UB);
-    emitStructStoreInst(IRB->getInt64(bounds.second), UB, Dim, Dim->getType(),
-                        1);
-
-    auto sizeVal = bounds.second - bounds.first + 1;
-    auto Size = IRB->CreateStructGEP(nullptr, Dim, 2, name + ".size");
-    // emitStoreInstruction(IRB->getInt64(sizeVal), Size);
-    emitStructStoreInst(IRB->getInt64(sizeVal), Size, Dim, Dim->getType(), 2);
-    I++;
-  }
-  return NewVal;
-}
-
-llvm::Value *CodeGen::getArgumentFor(llvm::Value *currArg, fc::Type *currArgTy,
-                                     fc::Type *fcDummyArgTy,
-                                     llvm::Function *llFn, unsigned argNum) {
-  if (currArgTy->isStructTy()) {
-    llvm::Type *llFuncArgType = llFn->getFunctionType()->getParamType(argNum);
-    llvm::Type *llCurrArgType = currArg->getType();
-
-    // This happens when multiple program-units inheriting the same derived-type
-    // from a common module. Each will have a local llvm::StructType which are
-    // equivalent, so we can safely bit-cast here
-    if (llFuncArgType != llCurrArgType) {
-      currArg = IRB->CreateBitCast(currArg, llFuncArgType);
-    }
-  }
-
-  // If the current value is expression and not a memory location
-  // create new alloca, store the expression value and then
-  // pass it.
-  if (!currArg->getType()->isPointerTy()) {
-    auto argName = llFn->getName().str() + ".arg" + std::to_string(argNum + 1);
-    llvm::Value *Alloca = nullptr;
-
-    if (auto constant = llvm::dyn_cast<llvm::Constant>(currArg)) {
-      auto global = new llvm::GlobalVariable(
-          *TheModule, constant->getType(), true,
-          llvm::GlobalValue::InternalLinkage, constant, argName);
-
-      Alloca = global;
-
-    } else {
-      Alloca = createAlloca(currArg->getType(), argName);
-      emitStoreInstruction(currArg, Alloca);
-    }
-    return Alloca;
-  }
-
-  if (currArgTy->isArrayTy()) {
-    auto fcArrayTy = cast<fc::ArrayType>(currArgTy);
-    auto dynArr = fcArrayTy->boundsEmpty();
-    fc::ArrayType *fcDummArrayTy = nullptr;
-    if (fcDummyArgTy)
-      fcDummArrayTy = dyn_cast<fc::ArrayType>(fcDummyArgTy);
-
-    bool dummyDynArr = false;
-    if (fcDummArrayTy == nullptr)
-      dummyDynArr = true;
-    else {
-      dummyDynArr = fcDummArrayTy->boundsEmpty();
-    }
-
-    // Everything is either dynamic/static. So, no issues.
-    if (dynArr == dummyDynArr) {
-      return currArg;
-    }
-
-    // Actual argument is not dynamic. But the dummy
-    // argument is expecting the dynamic array.
-    if (!dynArr && dummyDynArr) {
-      if (std == Standard::f77) {
-        auto baseEle = cgHelper->getLLVMTypeFor(fcArrayTy->getElementTy());
-        auto arrTy = llvm::ArrayType::get(baseEle, 0);
-        assert(arrTy);
-        return IRB->CreateBitCast(currArg, baseEle->getPointerTo());
-      }
-      return getDynamicArrayFor(currArg, fcArrayTy, fcDummArrayTy);
-    }
-
-    // If the current array is dynamic,
-    // and the dummy argument is accepting static array,
-    // we do not know how to deal with this.
-    if (dynArr && !dummyDynArr) {
-      llvm_unreachable("Function expecting static array");
-    }
-  }
-
-  return currArg;
 }
 
 bool CodeGen::emitExectubaleConstructList(StmtList &stmtList) {
@@ -1422,11 +1069,23 @@ bool CodeGen::emitExectubaleConstructList(StmtList &stmtList) {
     case AssignmentStmtKind:
       emitAssignment(static_cast<AssignmentStmt *>(actionStmt));
       break;
-    case StopStmtKind:
-      emitStopStmt(static_cast<StopStmt *>(actionStmt));
-      break;
     case PrintStmtKind:
       emitPrintStmt(static_cast<PrintStmt *>(actionStmt));
+      break;
+    case CloseStmtKind:
+      emitCloseStmt(static_cast<CloseStmt *>(actionStmt));
+      break;
+    case IfElseStmtKind:
+      emitIfElseStmt(static_cast<IfElseStmt *>(actionStmt));
+      break;
+    case DoWhileStmtKind:
+      emitFCDoWhileLoop(static_cast<DoWhileStmt *>(actionStmt));
+      break;
+    case DoStmtKind:
+      emitDoStmt(static_cast<DoStmt *>(actionStmt));
+      break;
+    case CallStmtKind:
+      emitCallStmt(static_cast<CallStmt *>(actionStmt));
       break;
     case WriteStmtKind:
       emitWriteStmt(static_cast<WriteStmt *>(actionStmt));
@@ -1437,52 +1096,51 @@ bool CodeGen::emitExectubaleConstructList(StmtList &stmtList) {
     case OpenStmtKind:
       emitOpenStmt(static_cast<OpenStmt *>(actionStmt));
       break;
-    case CloseStmtKind:
-      emitCloseStmt(static_cast<CloseStmt *>(actionStmt));
-      break;
-    case IfElseStmtKind:
-      emitIfElseStmt(static_cast<IfElseStmt *>(actionStmt));
-      break;
-    case DoWhileStmtKind:
-      emitDoWhileStmt(static_cast<DoWhileStmt *>(actionStmt));
-      break;
-    case DoStmtKind:
-      emitDoStmt(static_cast<DoStmt *>(actionStmt));
-      break;
-    case CallStmtKind:
-      emitCallStmt(static_cast<CallStmt *>(actionStmt));
-      break;
-    case CycleStmtKind:
-      emitCycleStmt(static_cast<CycleStmt *>(actionStmt));
-      break;
-    case ExitStmtKind:
-      emitExitStmt(static_cast<ExitStmt *>(actionStmt));
-      break;
-    case NullifyStmtKind:
-      emitNullifyStmt(static_cast<NullifyStmt *>(actionStmt));
-      break;
-    case AllocateStmtKind:
-      emitAllocateStmt(static_cast<AllocateStmt *>(actionStmt));
-      break;
-    case DeAllocateStmtKind:
-      emitDeAllocateStmt(static_cast<DeAllocateStmt *>(actionStmt));
-      break;
     case ReturnStmtKind: {
       auto returnStmt = static_cast<ReturnStmt *>(actionStmt);
       auto exitVal = returnStmt->getExpr();
       assert(!exitVal);
-      IRB->CreateRetVoid();
-
-      auto newBlock = getNewBlock("deadBlock", true);
-      IRB->SetInsertPoint(newBlock);
+      auto currBlock = builder.getBlock();
+      auto hasSingleRegionParent =
+          (llvm::isa<FC::DoOp>(currBlock->getParentOp()) ||
+           llvm::isa<loop::IfOp>(currBlock->getParentOp()));
+      if (!hasSingleRegionParent) {
+        builder.create<FC::FCReturnOp>(getLoc(returnStmt->getSourceLoc()));
+        auto deadBlock = builder.createBlock(builder.getBlock()->getParent());
+        builder.setInsertionPointToStart(deadBlock);
+      } else {
+        builder.create<FC::DoReturnOp>(getLoc(returnStmt->getSourceLoc()));
+      }
       break;
     }
-    case PointerAssignmentStmtKind:
-      emitPointerAssignment(static_cast<PointerAssignmentStmt *>(actionStmt));
+    case AllocateStmtKind: {
+      emitAllocateStmt(static_cast<AllocateStmt *>(actionStmt));
       break;
-
+    }
+    case StopStmtKind: {
+      emitStopStmt(static_cast<StopStmt *>(actionStmt));
+      break;
+    }
+    case ExitStmtKind: {
+      emitExitStmt(static_cast<ExitStmt *>(actionStmt));
+      break;
+    }
+    case CycleStmtKind: {
+      emitCycleStmt(static_cast<CycleStmt *>(actionStmt));
+      break;
+    }
+    case DeAllocateStmtKind: {
+      emitDeAllocateStmt(static_cast<DeAllocateStmt *>(actionStmt));
+      break;
+    }
+    case OpenMPParallelStmtKind: {
+      emitOpenMPParallelStmt(static_cast<OpenMPParallelStmt *>(actionStmt));
+      break;
+    }
     default:
-      llvm_unreachable("Unknown Stmt kind");
+      llvm::errs() << "\n Unhandled statement: "
+                   << actionStmt->dump(llvm::errs()) << "\n";
+      llvm_unreachable("Unhandled Stmt kind");
     };
   }
   return true;

@@ -29,6 +29,9 @@ using namespace fc;
 using namespace tok;
 using namespace utils;
 
+// TODO : CLEANUP : Optimize and remove repeated code
+//                  Better to rewrite
+
 namespace fc {
 struct TokenInfo {
   bool hasDigits;
@@ -469,32 +472,25 @@ Token Lexer::getNextToken() {
     update(loc, currPtr);
     ++currPtr;
     break;
-  case '.':
-    // TODO : Need a more generic way to ignore case. Parse ignore case?
-    if (strncmp(currPtr, ".eq.", 4) == 0 || strncmp(currPtr, ".EQ.", 4) == 0) {
-      Tok.Kind = (tok::eq);
-    } else if (strncmp(currPtr, ".ne.", 4) == 0 ||
-               strncmp(currPtr, ".NE.", 4) == 0) {
-      Tok.Kind = (tok::ne);
-    } else if (strncmp(currPtr, ".lt.", 4) == 0 ||
-               strncmp(currPtr, ".LT.", 4) == 0) {
-      Tok.Kind = (tok::lt);
-    } else if (strncmp(currPtr, ".le.", 4) == 0 ||
-               strncmp(currPtr, ".LE.", 4) == 0) {
-      Tok.Kind = (tok::le);
-    } else if (strncmp(currPtr, ".gt.", 4) == 0 ||
-               strncmp(currPtr, ".GT.", 4) == 0) {
-      Tok.Kind = (tok::gt);
-    } else if (strncmp(currPtr, ".ge.", 4) == 0 ||
-               strncmp(currPtr, ".GE.", 4) == 0) {
-      Tok.Kind = (tok::ge);
-    } else {
+  case '.': {
+    llvm::StringRef relationalOp{currPtr, 4};
+    TokenKind kind = llvm::StringSwitch<TokenKind>(relationalOp.lower())
+                         .Case(".eq.", tok::eq)
+                         .Case(".ne.", tok::ne)
+                         .Case(".lt.", tok::lt)
+                         .Case(".le.", tok::le)
+                         .Case(".gt.", tok::gt)
+                         .Case(".ge.", tok::ge)
+                         .Default(tok::undefined);
+    if (kind == tok::undefined) {
       error() << "\nFound character: \"" << *(currPtr + 1) << "\" \n";
       llvm_unreachable("unhandled token with . ");
     }
+    Tok.Kind = kind;
     update(loc, currPtr);
     currPtr += 4;
     break;
+  }
   case '\'':
   case '"': {
     int j = 1;
@@ -524,6 +520,13 @@ Token Lexer::getNextToken() {
 
   // Handle comments
   case '!': {
+
+    if (currPtr[1] == '$') {
+      Tok.Kind = tok::dir;
+      update(loc, currPtr);
+      currPtr += 2;
+      break;
+    }
 
     bool isNewLine = false;
     if (lastToken.Kind == tok::eol)

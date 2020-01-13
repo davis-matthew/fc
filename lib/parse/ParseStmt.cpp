@@ -22,6 +22,7 @@
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include "AST/Statements.h"
+#include "AST/StmtOpenMP.h"
 #include "parse/Parser.h"
 #include "sema/Intrinsics.h"
 
@@ -912,6 +913,9 @@ bool Parser::parseKeywordActionStmt(StmtList &stmtList, llvm::StringRef name) {
     return true;
   case tok::kw_nullify:
     stmtList.push_back(parseNullifyStmt());
+    return true;
+  case tok::dir:
+    stmtList.push_back(parseOpenMPRegion());
     return true;
   default:
     llvm_unreachable("Unhandled keyword actionstmt");

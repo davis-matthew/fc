@@ -21,24 +21,32 @@
 // CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 // OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-#ifndef FC_CODEGEN_H_
-#define FC_CODEGEN_H_
+#ifndef FC_MLIR_CODEGEN_NEW_H_
+#define FC_MLIR_CODEGEN_NEW_H_
 
 #include "AST/ASTPass.h"
 #include "AST/ParserTreeCommon.h"
 #include "AST/Type.h"
-#include "codegen/CGDebugInfo.h"
-#include "codegen/CGTBAAInfo.h"
-#include "llvm/IR/DIBuilder.h"
-#include "llvm/IR/IRBuilder.h"
+#include "common/Source.h"
+
+#include "llvm/ADT/MapVector.h"
+#include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringRef.h"
+
+#include "dialect/FCOps/FCOps.h"
+#include "mlir/Dialect/StandardOps/Ops.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/Module.h"
+
+#include <map>
 #include <memory>
 
-namespace llvm {
+namespace mlir {
 class Module;
-class Function;
-class LLVMContext;
-class TargetMachine;
-} // namespace llvm
+class FuncOp;
+class Block;
+class Location;
+} // namespace mlir
 
 namespace fc {
 
@@ -50,27 +58,27 @@ class CGASTHelper;
 class CGLoop {
 
 private:
-  llvm::BasicBlock *header;
-  llvm::BasicBlock *latch;
-  llvm::BasicBlock *exit;
+  mlir::Block *header;
+  mlir::Block *latch;
+  mlir::Block *exit;
   llvm::StringRef name;
 
 public:
-  CGLoop(llvm::BasicBlock *_header, llvm::BasicBlock *_latch,
-         llvm::BasicBlock *_exit, llvm::StringRef _name)
+  CGLoop(mlir::Block *_header, mlir::Block *_latch, mlir::Block *_exit,
+         llvm::StringRef _name)
       : header(_header), latch(_latch), exit(_exit), name(_name) {}
 
-  llvm::BasicBlock *getHeaderBB() {
+  mlir::Block *getHeaderBB() {
     assert(header);
     return header;
   }
 
-  llvm::BasicBlock *getLatchBB() {
+  mlir::Block *getLatchBB() {
     assert(latch);
     return latch;
   }
 
-  llvm::BasicBlock *getExitBB() {
+  mlir::Block *getExitBB() {
     assert(exit);
     return exit;
   }
@@ -81,37 +89,35 @@ public:
 class CodeGen : public ASTProgramPass {
 
 public:
-  bool freezeTBAA{false}; // TODO remove this! (see emitLoadInstruction())
-
   struct CGContext {
-    llvm::Function *currFn;
-    llvm::BasicBlock *currBB;
+    FC::FCFuncOp currFn;
+    mlir::Block *currBB;
     fc::ast::ProgramUnit *currPU;
-    llvm::StringMap<llvm::Value *> symbolMap;
+    mlir::Region *currRegion;
+    llvm::StringMap<mlir::Value> symbolMap;
     // Map holds the file descripter and corresponding file unit number
-    std::map<long int, llvm::Value *> FDMap;
+    std::map<long int, mlir::Value> FDMap;
 
     // Map to track the loops
     // TODO May be redundant?
     std::map<Stmt *, CGLoop *> stmtLoopMap;
     std::map<llvm::StringRef, CGLoop *> nameLoopMap;
-    llvm::SmallVector<CGLoop *, 2> currLoopVector;
-    llvm::GlobalVariable *ArgC;
-    llvm::GlobalVariable *ArgV;
-    llvm::MapVector<llvm::Value *, bool> functionAllocMap;
+    mlir::SmallVector<CGLoop *, 2> currLoopVector;
+    llvm::MapVector<mlir::Value, bool> functionAllocMap;
 
     bool needReturn;
 
     bool isParallelLoop;
     CGContext()
-        : currFn(nullptr), currBB(nullptr), currPU(nullptr), needReturn(true),
-          isParallelLoop(false) {}
+        : currFn(nullptr), currBB(nullptr), currPU(nullptr),
+          currRegion(nullptr), needReturn(true), isParallelLoop(false) {}
 
   public:
     void reset() {
       currFn = nullptr;
       currBB = nullptr;
       currPU = nullptr;
+      currRegion = nullptr;
       currLoopVector.clear();
       stmtLoopMap.clear();
       nameLoopMap.clear();
@@ -122,18 +128,18 @@ public:
       functionAllocMap.clear();
     }
 
-    llvm::Value *getLLVMValueFor(llvm::StringRef ref) {
+    mlir::Value getMLIRValueFor(llvm::StringRef ref) {
       auto val = symbolMap.find(ref.str());
       if (val == symbolMap.end())
         return nullptr;
       return val->second;
     }
 
-    llvm::Value *getFDFor(long int unit) { return FDMap[unit]; }
+    mlir::Value getFDFor(long int unit) { return FDMap[unit]; }
   };
 
-  CodeGen(ASTContext &C, std::unique_ptr<llvm::Module> &M, bool EnableDebug,
-          Standard std, std::unique_ptr<llvm::TargetMachine> &TM);
+  CodeGen(ASTContext &C, mlir::OwningModuleRef &theModule,
+          mlir::MLIRContext &mlirContext, Standard std);
 
   void deAllocateTemps();
 
@@ -143,16 +149,25 @@ public:
 
   void emitDebugMetaForFunction();
 
-  llvm::Function *emitFunction(Function *func);
+  FC::FCFuncOp getMLIRFuncOpFor(Symbol *symbol, ProgramUnit *calledPU,
+                                llvm::SmallVectorImpl<mlir::Value> &argList);
+
+  FC::FCFuncOp emitFunction(Function *func);
 
   bool emitASTModule(ast::Module *mod);
 
-  llvm::Value *getValue(Symbol *symbol);
+  mlir::Value getValue(Symbol *symbol);
 
   std::string getTypeForProramUnit(ProgramUnit *PU);
 
+  void populateExtraArgumentType(llvm::SmallVector<mlir::Type, 2> &argTypes);
+
   // Emit specification part.
   bool emitSpecificationPart(SpecificationPart *);
+
+  void emitParentVariableAccess(Symbol *sym);
+
+  void emitModuleVariableAccess(Symbol *sym);
 
   // Emit execution part.
   bool emitExecutionPart(ExecutionPart *execPart);
@@ -164,43 +179,43 @@ public:
 
   bool createGlobalExternForSymbol(Symbol *sym);
 
+  FC::FCFuncOp getOrInsertFuncOp(std::string name,
+                                 llvm::ArrayRef<mlir::Type> argTys,
+                                 mlir::Type retTy);
+
   /// \brief when \p constuctOnlyConstant is true, global constant value
   /// of type \p lhsTy is returned instead of GlobalVariable.
-  llvm::Value *emitConstant(llvm::ArrayRef<llvm::StringRef> valueList,
-                            fc::Type *type, fc::Type *lhsTy = nullptr,
-                            bool constuctOnlyConstant = false);
+  mlir::Value emitConstant(mlir::ArrayRef<llvm::StringRef> valueList,
+                           fc::Type *type, fc::Type *lhsTy = nullptr,
+                           bool constuctOnlyConstant = false);
 
-  llvm::Value *emitSizeForArrBounds(ArrayBounds &);
+  mlir::Value emitSizeForArrBounds(ArrayBounds &);
 
   // Emit array-element represented by \p arrEle. Set \p addr if this array
   // belongs to some GEP'ed address (eg. in the case of array within a
-  // struct-comp), ie. the llvm-arry for this arrEle is in \p addr.
+  // struct-comp), ie. the mlir-arry for this arrEle is in \p addr.
   // This signature is followed by the analogous emitXXXArrayElement() APIs.
-  llvm::Value *emitArrayElement(ArrayElement *arrEle, bool isLHS = false,
-                                llvm::Value *addr = nullptr);
+  mlir::Value emitArrayElement(ArrayElement *arrEle, bool isLHS = false,
+                               mlir::Value addr = nullptr);
 
-  llvm::Value *emitStaticArrayElement(ArrayElement *expr, bool isLHS = false,
-                                      llvm::Value *addr = nullptr);
+  mlir::Value emitFCArrayElement(ArrayElement *arrEle);
 
-  llvm::Value *emitDynArrayElement(ArrayElement *expr, bool isLHS = false,
-                                   llvm::Value *addr = nullptr);
+  mlir::Value emitStaticArrayElement(ArrayElement *expr, bool isLHS = false,
+                                     mlir::Value addr = nullptr);
 
-  llvm::Value *emitf77DynArrayElement(ArrayElement *expr, bool isLHS = false,
-                                      llvm::Value *addr = nullptr);
+  mlir::Value emitDynArrayElement(ArrayElement *expr, bool isLHS = false,
+                                  mlir::Value addr = nullptr);
 
-  llvm::Value *emitExpression(Expr *expr, bool isLHS = false);
+  mlir::Value emitf77DynArrayElement(ArrayElement *expr, bool isLHS = false,
+                                     mlir::Value addr = nullptr);
 
-  bool emitNullifyStmt(NullifyStmt *stmt);
+  mlir::Value emitExpression(Expr *expr, bool isLHS = false);
 
-  bool emitAllocateStmt(AllocateStmt *stmt);
-
-  bool emitDeAllocateStmt(DeAllocateStmt *stmt);
+  mlir::Value emitCastExpr(mlir::Value from, mlir::Type toType);
 
   bool emitAssignment(AssignmentStmt *stmt);
 
-  bool emitPointerAssignment(PointerAssignmentStmt *stmt);
-
-  bool emitAssignment(llvm::Value *lhs, llvm::Value *rhs);
+  bool emitArraySectionStore(Expr *lhs, Expr *rhs, mlir::Location mlirloc);
 
   bool emitStopStmt(StopStmt *stmt);
 
@@ -208,32 +223,48 @@ public:
 
   bool emitWriteStmt(WriteStmt *stmt);
 
+  bool emitInternalWriteStmt(WriteStmt *stmt);
+
   bool emitReadStmt(ReadStmt *stmt);
 
   bool emitInternalReadStmt(ReadStmt *stmt);
 
-  bool emitInternalWriteStmt(WriteStmt *stmt);
+  bool emitOpenStmt(OpenStmt *openStmt);
 
-  bool emitOpenStmt(OpenStmt *open);
-
-  bool emitCloseStmt(CloseStmt *close);
+  bool emitCloseStmt(CloseStmt *closeStmt);
 
   bool emitIfElseStmt(IfElseStmt *stmt);
 
-  bool emitDoWhileStmt(DoWhileStmt *stmt);
+  bool emitLoopIfOperation(IfElseStmt *stmt);
+
+  bool emitFCDoWhileLoop(DoWhileStmt *stmt);
 
   bool emitDoStmt(DoStmt *stmt);
 
+  bool emitFCDoLoop(DoStmt *stmt);
+
+  mlir::Value castToIndex(mlir::Value v);
+
   bool emitCallStmt(CallStmt *stmt);
 
-  llvm::Value *expandIntrinsic(FunctionReference *ref);
+  mlir::Value expandIntrinsic(FunctionReference *ref);
 
-  llvm::CallInst *emitCall(Symbol *symbol, ExprList &exprList,
-                           bool isSubroutineCall = false);
+  mlir::Operation *emitTrimCall(Symbol *symbol, ExprList &argsList);
+
+  mlir::Operation *handleMemCopyCall(Symbol *symbol, ExprList &argsList);
+
+  mlir::Operation *handleCmdLineArgs(Symbol *symbol, ExprList &argsList);
+
+  mlir::Operation *emitCall(Symbol *symbol, ExprList &exprList,
+                            bool isSubroutineCall = false);
 
   bool emitMemCpy(CallStmt *stmt);
 
   bool emitCycleStmt(CycleStmt *stmt);
+
+  bool emitDeAllocateStmt(DeAllocateStmt *stmt);
+
+  bool emitAllocateStmt(AllocateStmt *stmt);
 
   bool emitExitStmt(ExitStmt *Stmt);
 
@@ -241,82 +272,79 @@ public:
 
   void updateSymbolMapForFuncArg(Symbol *);
 
-  llvm::Value *getArrDimSizeVal(Expr *expr, llvm::Value *exprVal);
+  mlir::Value getArrDimSizeVal(Expr *expr, mlir::Value exprVal);
 
-  llvm::Value *castIntToFP(llvm::Value *val, llvm::Type *castToTy);
+  mlir::Value castIntToFP(mlir::Value val, mlir::Type castToTy);
 
-  llvm::Value *getLLVMBinaryOp(llvm::Value *lhsVal, llvm::Value *rhsVal,
-                               BinaryOpKind opKind);
+  mlir::Value getMLIRBinaryOp(mlir::Value lhsVal, mlir::Value rhsVal,
+                              BinaryOpKind opKind);
+  mlir::Value getMLIRArrayBinaryOp(mlir::Value lhsVal, mlir::Value rhsVal,
+                                   fc::ast::BinaryOpKind opKind);
+  mlir::Value getMLIRRelationalOp(mlir::Value lhsVal, mlir::Value rhsVal,
+                                  RelationalOpKind opKind);
+  mlir::Value getMLIRArrayRelationalOp(mlir::Value lhsVal, mlir::Value rhsVal,
+                                       RelationalOpKind opKind);
 
-  llvm::Value *getLLVMRelationalOp(llvm::Value *lhsVal, llvm::Value *rhsVal,
-                                   RelationalOpKind opKind);
+  mlir::Value getMLIRLogicalOp(mlir::Value lhsVal, mlir::Value rhsVal,
+                               LogicalOpKind opKind);
 
-  llvm::Value *getLLVMLogicalOp(llvm::Value *lhsVal, llvm::Value *rhsVal,
-                                LogicalOpKind opKind);
+  mlir::Block *getNewBlock(mlir::Block *insertBefore);
 
-  llvm::Value *emitStrCmp(llvm::Value *lhs, llvm::Value *rhsVal,
-                          RelationalOpKind opKind);
+  FC::AllocaOp createAlloca(mlir::Type type, llvm::StringRef name);
 
-  llvm::BasicBlock *getNewBlock(llvm::StringRef name, bool insertToFn = false);
-
-  llvm::AllocaInst *createAlloca(llvm::Type *type, llvm::StringRef name);
-
-  llvm::AllocaInst *createAlloca(Symbol *symbol);
-
-  void visitLLVMModule();
-
-  llvm::Function *dumpMain(fc::Function *fcMain);
+  FC::AllocaOp createAlloca(Symbol *symbol);
 
   bool emitFunctionDeclaration(ProgramUnit *PU);
 
   bool runOnProgram(ParseTree *parseTree) override;
 
-  bool constructFrameArgForProgramUnit();
-
-  void nullifyPointerAlloca(Type *type, llvm::Value *addr);
-
   bool updateArgForNestProgramUnit();
 
-  llvm::LoadInst *emitStructLoadInst(llvm::Value *V, llvm::Value *structPtr,
-                                     llvm::Type *structTy, uint64_t offset,
-                                     const llvm::Twine &Name = "load");
+  FC::FCLoadOp emitLoadInstruction(mlir::Value V,
+                                   const mlir::Twine &Name = "load",
+                                   bool disableTBAA = false);
 
-  llvm::LoadInst *emitLoadInstruction(llvm::Value *V,
-                                      const llvm::Twine &Name = "load",
-                                      bool disableTBAA = false);
-
-  void emitStructStoreInst(llvm::Value *V, llvm::Value *Ptr,
-                           llvm::Value *structPtr, llvm::Type *structTy,
-                           uint64_t offset);
-
-  void emitStoreInstruction(llvm::Value *V, llvm::Value *Ptr,
+  void emitStoreInstruction(mlir::Value V, mlir::Value Ptr,
                             bool disableTBAA = false);
 
-  llvm::Argument *getIntentArgForSymbol(Symbol *symbol);
+  mlir::Value getIntentArgForSymbol(Symbol *symbol);
 
-  llvm::Value *getArgumentFor(llvm::Value *currArg, fc::Type *currArgTy,
-                              fc::Type *fcDummyArgTy, llvm::Function *llFn,
-                              unsigned argNum);
+  mlir::Value getArgumentFor(mlir::Value currArg, fc::Type *currArgTy,
+                             fc::Type *fcDummyArgTy, FC::FCFuncOp *llFn,
+                             unsigned argNum);
 
-  llvm::Value *getDynamicArrayFor(llvm::Value *val, fc::ArrayType *staticArrTy,
-                                  fc::ArrayType *dynArrTy);
-  llvm::Value *emitStructureComponent(fc::StructureComponent *structComp,
-                                      bool isLHS);
+  mlir::Value getDynamicArrayFor(mlir::Value val, fc::ArrayType *staticArrTy,
+                                 fc::ArrayType *dynArrTy);
+
+  mlir::Location getLoc(fc::SourceLoc loc);
+
+  mlir::SymbolRefAttr getIntrinFunction(llvm::StringRef name, mlir::Type type);
+
+  mlir::SymbolRefAttr getFmaxFunction();
+
+  bool createSubPUHelpers(ProgramUnit *PU);
+
+  // OpenMP
+  bool emitOpenMPParallelStmt(OpenMPParallelStmt *stmt);
+
+  bool emitOpenMPParallelDoStmt(OpenMPParallelDoStmt *stmt);
+
+  mlir::SymbolRefAttr getSymbolScopeList(Symbol *sym);
+
+  mlir::Operation *getOpForSymRef(mlir::SymbolRefAttr symRef);
 
 private:
-  std::unique_ptr<llvm::Module> &TheModule;
   ParseTree *parseTree;
-  llvm::LLVMContext *LLContext;
-  llvm::IRBuilder<> *IRB;
+  ASTContext &C;
+  mlir::MLIRContext &mlirContext;
+  mlir::OpBuilder builder;
+  mlir::OwningModuleRef &theModule;
   CGContext context;
   RuntimeHelper *runtimeHelper;
-  std::unique_ptr<llvm::TargetMachine> &TM;
   CGASTHelper *cgHelper;
-  bool EnableDebug;
-  CGDebugInfo *debugHelper;
-  CGTBAAInfo *tbaaHelper;
-  llvm::DIBuilder *diBuilder;
   Standard std;
+  std::map<std::string, mlir::FunctionType> calledFuncs;
+  bool EnableDebug;
 };
 
 } // namespace fc

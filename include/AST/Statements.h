@@ -55,7 +55,7 @@ public:
 
   ~AssignmentStmt() {}
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   inline Expr *getRHS() const { return static_cast<Expr *>(operands[1]); }
 
@@ -82,7 +82,7 @@ public:
 
   ~PointerAssignmentStmt() {}
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   inline Expr *getRHS() const { return static_cast<Expr *>(operands[1]); }
 
@@ -108,7 +108,7 @@ public:
     return Stmt->getStmtType() == IfStmtKind;
   }
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   inline Expr *getCondition() { return static_cast<Expr *>(operands[0]); }
 
@@ -140,7 +140,7 @@ public:
 
   ~IfElseStmt() {}
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   inline IfStmt *getIfStmt(unsigned I) const {
     return static_cast<IfStmt *>(getOperand(I));
@@ -159,7 +159,7 @@ public:
 
   ~ForAllStmt() {}
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   inline Block *getBlock() const { return static_cast<Block *>(operands[0]); }
 
@@ -201,7 +201,7 @@ public:
 
   ~DoStmt() {}
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   inline QuadExpr *getQuadExpr() const {
     return static_cast<QuadExpr *>(operands[0]);
@@ -241,7 +241,7 @@ public:
 
   ~DoWhileStmt() {}
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   inline Expr *getLogicalExpr() const {
     return static_cast<Expr *>(operands[0]);
@@ -272,7 +272,7 @@ public:
 
   ~StopStmt() {}
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   inline Expr *getStopCode() const { return static_cast<Expr *>(operands[0]); }
 
@@ -388,7 +388,7 @@ public:
 
   ~PrintStmt() {}
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   inline Expr *getExpr(unsigned I) const {
     return static_cast<Expr *>(getOperand(I));
@@ -419,7 +419,7 @@ public:
 
   ~WriteStmt() {}
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   inline Expr *getExpr(unsigned i) const {
     return static_cast<Expr *>(getOperand(i + 4));
@@ -490,7 +490,7 @@ public:
 
   ~ReadStmt() {}
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   inline Expr *getExpr(unsigned I) const {
     return static_cast<Expr *>(getOperand(I + 3));
@@ -540,7 +540,7 @@ public:
 
   ~CallStmt() {}
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   inline void setCalledFn(Symbol *newFn) { sym = newFn; }
 
@@ -583,7 +583,7 @@ public:
 
   ~OpenStmt() {}
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   inline Expr *getUnit() const { return static_cast<Expr *>(operands[0]); }
 
@@ -624,7 +624,7 @@ public:
 
   ~ExitStmt() {}
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   inline std::string getConstructName() const { return constructName.str(); }
 
@@ -646,7 +646,7 @@ public:
 
   ~ReturnStmt() {}
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   inline Expr *getExpr() const { return static_cast<Expr *>(operands[0]); }
 };
@@ -667,7 +667,7 @@ public:
 
   ~CycleStmt() {}
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   inline std::string getConstructName() const { return constructName.str(); }
 
@@ -691,7 +691,7 @@ public:
 
   ~CloseStmt() {}
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   Expr *getUnit() const { return static_cast<Expr *>(operands[0]); }
 
@@ -715,7 +715,7 @@ public:
     return Stmt->getStmtType() == WhereStmtKind;
   }
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   inline Expr *getMaskExpr() const { return static_cast<Expr *>(operands[0]); }
   inline Block *getBlock() const { return static_cast<Block *>(operands[1]); }
@@ -744,7 +744,7 @@ public:
     return stmt->getStmtType() == WhereConstructKind;
   }
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   inline WhereStmt *getWhereStmt(unsigned i) const {
     return static_cast<WhereStmt *>(getOperand(i));
@@ -773,7 +773,7 @@ public:
     return Stmt->getStmtType() == CaseStmtKind;
   }
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   inline ExprList getExprList() const {
     ExprList list;
@@ -807,7 +807,7 @@ public:
     return Stmt->getStmtType() == SelectCaseStmtKind;
   }
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   inline Expr *getSelectExpr() const {
     return static_cast<Expr *>(getOperand(0));

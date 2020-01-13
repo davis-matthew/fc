@@ -134,7 +134,7 @@ Symbol *SymbolTable::getOrInsertSymbol(llvm::StringRef name, Type *type,
 SymbolTable::SymbolTable(ASTContext &Context, ScopeKind scopeKind,
                          llvm::StringRef name, SymbolTable *parent)
     : scopeKind(scopeKind), symName(name), parent(parent), Context(Context),
-      loadedFromModFile(false) {}
+      PU(nullptr), loadedFromModFile(false) {}
 
 SymbolTable *SymbolTable::get(ASTContext &Context, ScopeKind scopeKind,
                               llvm::StringRef name, SymbolTable *parent) {

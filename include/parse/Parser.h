@@ -173,6 +173,14 @@ private:
 
   bool parseActionStmt(StmtList &stmtList, bool consumeNext = true);
 
+  bool isOpenMPEndStmt();
+
+  OpenMPParallelStmt *parseOpenMPParallel();
+
+  OpenMPParallelDoStmt *parseOpenMPParallelDoStmt();
+
+  Stmt *parseOpenMPRegion();
+
   StopStmt *parseStopStmt();
 
   PrintStmt *parsePrintStmt();

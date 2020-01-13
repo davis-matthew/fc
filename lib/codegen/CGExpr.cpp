@@ -26,613 +26,556 @@
 #include "AST/Type.h"
 #include "codegen/CGASTHelper.h"
 #include "codegen/CodeGen.h"
-#include "codegen/LLVMUtil.h"
-#include "codegen/RuntimeHelper.h"
 #include "common/Debug.h"
+#include "dialect/FCOps/FCOps.h"
 #include "sema/Intrinsics.h"
 
+#include "mlir/Analysis/Verifier.h"
+#include "mlir/Dialect/AffineOps/AffineOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "mlir/Dialect/StandardOps/Ops.h"
+#include "mlir/IR/AffineExpr.h"
+#include "mlir/IR/Attributes.h"
+#include "mlir/IR/Builders.h"
+#include "mlir/IR/Function.h"
+#include "mlir/IR/StandardTypes.h"
+
 #include "AST/Expressions.h"
-#include "llvm-c/Target.h"
-#include "llvm/IR/IRBuilder.h"
-#include "llvm/IR/Module.h"
-#include "llvm/IR/Verifier.h"
 
 using namespace fc;
 using namespace ast;
-using namespace llvm;
 
-Value *CodeGen::emitConstant(llvm::ArrayRef<llvm::StringRef> valueList,
-                             fc::Type *fcType, fc::Type *lhsTy,
-                             bool constructOnlyConstant) {
-  bool isString = false;
-  auto ArrTy = dyn_cast<ArrayType>(fcType);
-  if ((ArrTy && ArrTy->getElementTy()->isStringCharTy()) ||
-      fcType->isCharacterTy()) {
-    isString = true;
-  }
-  auto LLTy = cgHelper->getLLVMTypeFor(fcType);
-
-  std::string valString = valueList[0];
-  llvm::StringRef value(valString.c_str(), valString.size());
-
-  if (isString) {
-    // We can not use IRBuilder here as incase of modules string consts
-    // IRBuilder is yet to be initialised
-    if (lhsTy) {
-      auto arrayTy = llvm::dyn_cast<fc::ArrayType>(lhsTy);
-      assert(arrayTy);
-      assert(!arrayTy->isDynArrayTy());
-      auto bounds = arrayTy->getBoundsList();
-      assert(bounds.size() == 1);
-      auto stringSize = bounds[0].second - bounds[0].first;
-      for (unsigned i = value.size(); i < stringSize; ++i) {
-        valString.push_back('\0');
-      }
-    }
-    llvm::StringRef finalValue(valString.c_str(), valString.size());
-    llvm::Constant *StrConstant =
-        llvm::ConstantDataArray::getString(TheModule->getContext(), finalValue);
-
-    if (constructOnlyConstant)
-      return StrConstant;
-
-    auto *GV = new llvm::GlobalVariable(*TheModule, StrConstant->getType(),
-                                        true, llvm::GlobalValue::PrivateLinkage,
-                                        StrConstant, "str", nullptr,
-                                        llvm::GlobalVariable::NotThreadLocal);
-    GV->setUnnamedAddr(llvm::GlobalValue::UnnamedAddr::Global);
-    return GV;
-  }
-
-  if (LLTy->isIntegerTy()) {
-    long int val = INT_MIN;
-
-    if (LLTy->isIntegerTy(1))
-      val = (value.compare_lower(".false.") == 0) ? 0 : 1;
-    else if (LLTy->isIntegerTy(64))
-      val = std::stol(value);
-    else if (LLTy->isIntegerTy(128)) {
-      assert(false);
-      llvm::APInt apInt(128, val, 10);
-      return IRB->getInt(apInt);
-    } else if (LLTy->isIntegerTy(8)) {
-      assert(value.size() == 1);
-      llvm::APInt apInt(8, value.str()[0], 10);
-      return IRB->getInt(apInt);
-    } else if (LLTy->isIntegerTy(32)) {
-      val = std::stoi(value);
-    } else {
-      errs() << *LLTy;
-      assert(false && "unhandled integer type");
-    }
-
-    return IRB->getIntN(LLTy->getScalarSizeInBits(), val);
-  }
-
-  if (LLTy->isArrayTy()) {
-    auto llArrTy = llvm::cast<llvm::ArrayType>(LLTy);
-    auto fcArrTy = llvm::cast<fc::ArrayType>(fcType);
-    llvm::SmallVector<llvm::Constant *, 2> constValList;
-    for (auto val : valueList) {
-      auto constVal = llvm::cast<llvm::Constant>(
-          emitConstant(val, fcArrTy->getElementTy()));
-      constValList.push_back(constVal);
-    }
-    auto constArr = ConstantArray::get(llArrTy, constValList);
-    return constArr;
-  }
-
-  assert(LLTy->isFloatingPointTy());
-  auto str = value.str();
-  for (auto &ch : str) {
-    if (ch == 'd') {
-      ch = 'e';
-      LLTy = IRB->getDoubleTy();
-    }
-  }
-  auto Const = ConstantFP::get(LLTy, str);
-  return Const;
-}
-
-llvm::Value *CodeGen::castIntToFP(llvm::Value *val, llvm::Type *castType) {
-  assert(val->getType()->isIntegerTy());
-  auto IntTy = static_cast<IntegerType *>(val->getType());
-  auto bitWidth = IntTy->getBitWidth();
-  if (bitWidth == 64) {
-    // convert to float
-    castType = IRB->getDoubleTy();
-  } else if (bitWidth > 64) {
-    assert(false && "unhandled integer type");
+// TODO : Move to a helper class?
+mlir::SymbolRefAttr CodeGen::getIntrinFunction(llvm::StringRef fnName,
+                                               mlir::Type type) {
+  auto string = fnName.str();
+  if (type.isF32()) {
+    string += ".f32";
+  } else if (type.isF64()) {
+    string += ".f64";
   } else {
-    assert(bitWidth == 32);
-    // TODO: hande other smaller types.
+    assert(false && "unknown intrinsic type!");
   }
-  return IRB->CreateSIToFP(val, castType, "castforPow");
+  if (auto funcOp = theModule->lookupSymbol<FC::FCFuncOp>(string)) {
+    assert(funcOp);
+    return mlir::SymbolRefAttr::get(string, &mlirContext);
+  }
+
+  auto insertPt = builder.saveInsertionPoint();
+  builder.setInsertionPointToStart(theModule->getBody());
+
+  llvm::ArrayRef<mlir::Type> tys{type};
+  auto mlirFuncType = mlir::FunctionType::get(tys, tys, &mlirContext);
+  auto mlirloc = builder.getUnknownLoc();
+  builder.create<FC::FCFuncOp>(mlirloc, string, mlirFuncType);
+  builder.restoreInsertionPoint(insertPt);
+  return mlir::SymbolRefAttr::get(string, &mlirContext);
 }
 
-llvm::Value *CodeGen::getLLVMBinaryOp(llvm::Value *lhsVal, llvm::Value *rhsVal,
-                                      fc::ast::BinaryOpKind opKind) {
-
-  // This conversion is required as some intrinsics are resoved in codegen
-  // Type of binaryexpressions involving these will not resolved in sema.
-  // Either we have to explicitely infer intrinsic type or do this
-  if (lhsVal->getType()->isIntegerTy(32) &&
-      rhsVal->getType()->isIntegerTy(64)) {
-    lhsVal = IRB->CreateSExt(lhsVal, rhsVal->getType());
+mlir::SymbolRefAttr CodeGen::getFmaxFunction() {
+  auto fnName = "llvm.maxnum.f64";
+  if (auto funcOp = theModule->lookupSymbol<FC::FCFuncOp>(fnName)) {
+    assert(funcOp);
+    return mlir::SymbolRefAttr::get(fnName, &mlirContext);
   }
 
-  if (lhsVal->getType()->isIntegerTy(64) &&
-      rhsVal->getType()->isIntegerTy(32)) {
-    rhsVal = IRB->CreateSExt(rhsVal, lhsVal->getType());
+  auto insertPt = builder.saveInsertionPoint();
+  builder.setInsertionPointToStart(theModule->getBody());
+  auto F64 = builder.getF64Type();
+  llvm::ArrayRef<mlir::Type> inputTys{F64, F64};
+  llvm::ArrayRef<mlir::Type> resultTys{F64};
+  auto mlirFuncType =
+      mlir::FunctionType::get(inputTys, resultTys, &mlirContext);
+  auto mlirloc = builder.getFileLineColLoc(
+      builder.getIdentifier(this->parseTree->getName()), 1, 1);
+  builder.create<FC::FCFuncOp>(mlirloc, fnName, mlirFuncType);
+  builder.restoreInsertionPoint(insertPt);
+  return mlir::SymbolRefAttr::get(fnName, &mlirContext);
+}
+
+mlir::Value CodeGen::emitCastExpr(mlir::Value fromVal, mlir::Type toType) {
+  auto fromType = fromVal.getType();
+
+  if (fromType == toType)
+    return fromVal;
+
+  auto mlirloc = fromVal.getLoc();
+  if (toType.isa<mlir::IntegerType>() && fromType.isa<mlir::IndexType>()) {
+    auto castOp = builder.create<mlir::IndexCastOp>(mlirloc, toType, fromVal);
+    return castOp.getResult();
+  } else if (fromType.isa<mlir::IntegerType>() &&
+             toType.isa<mlir::IndexType>()) {
+    auto castOp = builder.create<mlir::IndexCastOp>(mlirloc, toType, fromVal);
+    return castOp.getResult();
+  } else if (toType.isF32() && fromType.isF64()) {
+    auto castOp = builder.create<mlir::FPTruncOp>(mlirloc, toType, fromVal);
+    return castOp.getResult();
+  } else if (toType.isF64() && fromType.isF32()) {
+    auto castOp = builder.create<mlir::FPExtOp>(mlirloc, toType, fromVal);
+    return castOp.getResult();
+  } else if (toType.isa<mlir::IntegerType>() &&
+             fromType.isa<mlir::FloatType>()) {
+    auto castOp = builder.create<FC::CastOp>(mlirloc, toType, fromVal);
+    return castOp.getResult();
+  } else if (toType.isa<mlir::FloatType>() &&
+             fromType.isa<mlir::IntegerType>()) {
+    auto castOp = builder.create<mlir::SIToFPOp>(mlirloc, toType, fromVal);
+    return castOp.getResult();
+  } else if (toType.isa<mlir::IntegerType>() &&
+             fromType.isa<mlir::IntegerType>()) {
+    if (toType.cast<mlir::IntegerType>().getWidth() <
+        fromType.cast<mlir::IntegerType>().getWidth()) {
+      auto castOp = builder.create<mlir::TruncateIOp>(mlirloc, toType, fromVal);
+      return castOp.getResult();
+    } else if (toType.cast<mlir::IntegerType>().getWidth() >
+               fromType.cast<mlir::IntegerType>().getWidth()) {
+      auto castOp =
+          builder.create<mlir::SignExtendIOp>(mlirloc, toType, fromVal);
+      return castOp.getResult();
+    } else {
+      llvm_unreachable("Unhandled\n");
+    }
+  } else {
+    auto castOp = builder.create<FC::CastOp>(mlirloc, toType, fromVal);
+    return castOp.getResult();
+  }
+}
+
+mlir::Value CodeGen::emitConstant(llvm::ArrayRef<llvm::StringRef> valueList,
+                                  fc::Type *fcType, fc::Type *lhsTy,
+                                  bool constructOnlyConstant) {
+
+  llvm_unreachable("emitconstant");
+}
+
+mlir::Value CodeGen::castIntToFP(mlir::Value val, mlir::Type castType) {
+  auto mlirloc = val.getLoc();
+  auto castOp = builder.create<mlir::SIToFPOp>(mlirloc, castType, val);
+  return castOp.getResult();
+}
+
+FC::FCFuncOp CodeGen::getOrInsertFuncOp(std::string name,
+                                        llvm::ArrayRef<mlir::Type> argTys,
+                                        mlir::Type retTy) {
+  FC::FCFuncOp mlirFunc = nullptr;
+
+  if (!(theModule->lookupSymbol(name))) {
+    auto mlirFuncType =
+        mlir::FunctionType::get(argTys, {retTy}, theModule->getContext());
+    auto mlirloc = builder.getFileLineColLoc(
+        builder.getIdentifier(this->parseTree->getName()), 1, 1);
+    mlirFunc = FC::FCFuncOp::create(mlirloc, name, mlirFuncType);
+    theModule->push_back(mlirFunc);
+  } else {
+    mlirFunc = llvm::dyn_cast<FC::FCFuncOp>(theModule->lookupSymbol(name));
   }
 
-  if (lhsVal->getType()->isFloatTy() && rhsVal->getType()->isDoubleTy()) {
-    lhsVal = IRB->CreateFPExt(lhsVal, rhsVal->getType());
-  }
+  assert(mlirFunc);
+  return mlirFunc;
+}
 
-  if (rhsVal->getType()->isFloatTy() && lhsVal->getType()->isDoubleTy()) {
-    rhsVal = IRB->CreateFPExt(rhsVal, lhsVal->getType());
-  }
+mlir::Value CodeGen::getMLIRBinaryOp(mlir::Value lhsVal, mlir::Value rhsVal,
+                                     fc::ast::BinaryOpKind opKind) {
 
-  if (rhsVal->getType()->isFloatingPointTy() &&
-      lhsVal->getType()->isIntegerTy()) {
-    lhsVal = IRB->CreateSIToFP(lhsVal, rhsVal->getType());
-  }
+  bool isIndex = lhsVal.getType().isa<mlir::IndexType>();
+  bool isRHSIndex = rhsVal.getType().isa<mlir::IndexType>();
 
-  if (lhsVal->getType()->isFloatingPointTy() &&
-      rhsVal->getType()->isIntegerTy()) {
-    rhsVal = IRB->CreateSIToFP(rhsVal, lhsVal->getType());
-  }
+  bool isInt = lhsVal.getType().isa<mlir::IntegerType>() || isIndex;
 
-  bool isInt = lhsVal->getType()->isIntegerTy();
-  bool isRHSInt = rhsVal->getType()->isIntegerTy();
-  auto OpType = Instruction::Add;
+  bool isRHSInt = rhsVal.getType().isa<mlir::IntegerType>() || isRHSIndex;
+  auto mlirloc = lhsVal.getLoc();
+  assert(isInt == isRHSInt);
+
+  // If one of them is index type. Convert both to index.
+  if (isIndex != isRHSIndex) {
+    if (isIndex) {
+      assert(isRHSInt);
+      rhsVal = builder.create<mlir::IndexCastOp>(mlirloc, rhsVal,
+                                                 builder.getIndexType());
+    } else {
+      assert(isInt);
+      lhsVal = builder.create<mlir::IndexCastOp>(mlirloc, lhsVal,
+                                                 builder.getIndexType());
+    }
+  }
 
   switch (opKind) {
+  case BinaryOpKind::Addition: {
+    if (isInt)
+      return builder.create<mlir::AddIOp>(mlirloc, lhsVal, rhsVal).getResult();
+    return builder.create<mlir::AddFOp>(mlirloc, lhsVal, rhsVal).getResult();
+  }
+  case BinaryOpKind::Subtraction: {
+    if (isInt)
+      return builder.create<mlir::SubIOp>(mlirloc, lhsVal, rhsVal).getResult();
+    return builder.create<mlir::SubFOp>(mlirloc, lhsVal, rhsVal).getResult();
+  }
+  case BinaryOpKind::Multiplication: {
+    if (isInt)
+      return builder.create<mlir::MulIOp>(mlirloc, lhsVal, rhsVal).getResult();
+    return builder.create<mlir::MulFOp>(mlirloc, lhsVal, rhsVal).getResult();
+  }
+  case BinaryOpKind::Division: {
+    if (isInt)
+      return builder.create<mlir::SignedDivIOp>(mlirloc, lhsVal, rhsVal)
+          .getResult();
+    return builder.create<mlir::DivFOp>(mlirloc, lhsVal, rhsVal).getResult();
+  }
+  case BinaryOpKind::Mod: {
+    if (isInt)
+      return builder.create<mlir::SignedRemIOp>(mlirloc, lhsVal, rhsVal)
+          .getResult();
+    return builder.create<mlir::RemFOp>(mlirloc, lhsVal, rhsVal).getResult();
+  }
   case BinaryOpKind::Concat: {
-    auto Fn = runtimeHelper->getStrCatFunction();
-    lhsVal = IRB->CreateBitCast(lhsVal, IRB->getInt8PtrTy());
-    rhsVal = IRB->CreateBitCast(rhsVal, IRB->getInt8PtrTy());
-    return IRB->CreateCall(Fn, {lhsVal, rhsVal});
+    return builder
+        .create<FC::StrCatOp>(mlirloc, lhsVal.getType(), lhsVal, rhsVal)
+        .getResult();
   }
 
-  case BinaryOpKind::Addition:
-    OpType = isInt ? Instruction::Add : Instruction::FAdd;
-    break;
-  case BinaryOpKind::Subtraction:
-    OpType = isInt ? Instruction::Sub : Instruction::FSub;
-    break;
-  case BinaryOpKind::Multiplication:
-    OpType = isInt ? Instruction::Mul : Instruction::FMul;
-    break;
-  case BinaryOpKind::Division:
-    OpType = isInt ? Instruction::SDiv : Instruction::FDiv;
-    break;
   case BinaryOpKind::Power: {
-    // TODO: check if
-    auto OpIntrin = Intrinsic::pow;
-
     bool convertedRHS = false;
     bool convertedLHS = false;
-    auto OrigType = lhsVal->getType();
+    mlir::Type mlirF32Ty = mlir::FloatType::getF32(&mlirContext),
+               mlirF64Ty = mlir::FloatType::getF64(&mlirContext),
+               mlirI32Ty = mlir::IntegerType::get(32, &mlirContext);
+
+    auto OrigType = lhsVal.getType();
 
     if (isInt) {
-      lhsVal = castIntToFP(lhsVal, IRB->getFloatTy());
+      lhsVal = castIntToFP(lhsVal, mlirF32Ty);
       convertedLHS = true;
     }
 
     if (isInt && isRHSInt) {
-      rhsVal = castIntToFP(rhsVal, lhsVal->getType());
+      rhsVal = castIntToFP(rhsVal, lhsVal.getType());
       convertedRHS = true;
     }
 
-    if (!isInt && isRHSInt)
-      OpIntrin = Intrinsic::powi;
+    // FIXME, we need (or to find?) this in the mlir repo
+    auto isFloatTy = [](mlir::Type ty) {
+      return ty.isF16() || ty.isF32() || ty.isF64();
+    };
 
-    if (lhsVal->getType() != rhsVal->getType() &&
-        rhsVal->getType()->isFloatingPointTy() &&
-        lhsVal->getType()->isFloatingPointTy()) {
-      rhsVal = IRB->CreateFPCast(rhsVal, lhsVal->getType(), "fpcast");
+    if (lhsVal.getType() != rhsVal.getType() && isFloatTy(rhsVal.getType()) &&
+        isFloatTy(lhsVal.getType())) {
+      rhsVal = builder.create<FC::CastOp>(mlirloc, lhsVal.getType(), rhsVal)
+                   .getResult();
+      /* rhsVal = IRB->CreateFPCast(rhsVal, lhsVal.getType(), "fpcast"); */
     }
 
-    Value *finalVal = nullptr;
-    if (auto constRHS = llvm::dyn_cast<llvm::ConstantFP>(rhsVal)) {
-      if (constRHS->isExactlyValue(2.0)) {
-        finalVal = IRB->CreateFMul(lhsVal, lhsVal, "pow");
-      } else if (constRHS->isExactlyValue(0.75)) {
-        auto sqrt = IRB->CreateIntrinsic(llvm::Intrinsic::sqrt, {lhsVal},
-                                         nullptr, "pow.sqrt");
-        auto sqrtOfSqrt = IRB->CreateIntrinsic(llvm::Intrinsic::sqrt, {sqrt},
-                                               nullptr, "pow.sqrt");
-        finalVal = IRB->CreateFMul(sqrt, sqrtOfSqrt, "pow.final");
+    assert(isFloatTy(lhsVal.getType()));
+
+    FC::FCFuncOp powFunc = nullptr;
+    if (lhsVal.getType().isF32() && rhsVal.getType().isF32()) {
+      powFunc =
+          getOrInsertFuncOp("llvm.pow.f32", {mlirF32Ty, mlirF32Ty}, mlirF32Ty);
+
+    } else if (lhsVal.getType().isF64() && rhsVal.getType().isF64()) {
+      powFunc =
+          getOrInsertFuncOp("llvm.pow.f64", {mlirF64Ty, mlirF64Ty}, mlirF64Ty);
+
+    } else {
+      assert(rhsVal.getType().isInteger(32));
+      if (lhsVal.getType().isF32()) {
+        powFunc = getOrInsertFuncOp("llvm.powi.f32", {mlirF32Ty, mlirI32Ty},
+                                    mlirF32Ty);
+
+      } else if (lhsVal.getType().isF64()) {
+        powFunc = getOrInsertFuncOp("llvm.powi.f64", {mlirF64Ty, mlirI32Ty},
+                                    mlirF64Ty);
       }
     }
 
-    if (!finalVal)
-      finalVal = IRB->CreateBinaryIntrinsic(OpIntrin, lhsVal, rhsVal);
+    assert(powFunc);
+
+    llvm::SmallVector<mlir::Value, 2> funcArgList;
+    funcArgList.push_back(lhsVal);
+    funcArgList.push_back(rhsVal);
+
+    mlir::Value finalVal = nullptr;
+    finalVal = builder.create<FC::FCCallOp>(mlirloc, powFunc, funcArgList)
+                   .getResult(0);
 
     if (convertedLHS && convertedRHS) {
-      return IRB->CreateFPToSI(finalVal, OrigType);
+      finalVal =
+          builder.create<FC::CastOp>(mlirloc, OrigType, finalVal).getResult();
     }
+
     return finalVal;
   }
-  default:
-    llvm_unreachable("unhandled llvm binary op");
+  default: { llvm_unreachable("unhandled binary expresssion"); }
   };
-
-  assert(lhsVal->getType() == rhsVal->getType());
-
-  return IRB->CreateBinOp(OpType, lhsVal, rhsVal);
 }
 
-llvm::Value *CodeGen::emitStrCmp(llvm::Value *lhsVal, llvm::Value *rhsVal,
-                                 RelationalOpKind opKind) {
-  auto I8Ptr = IRB->getInt8PtrTy();
-  auto arg1 = IRB->CreateBitCast(lhsVal, I8Ptr);
-  auto arg2 = IRB->CreateBitCast(rhsVal, I8Ptr);
-  auto Fn = runtimeHelper->getStrCmpFunction();
-  auto cmpVal = IRB->CreateCall(Fn, {arg1, arg2});
+mlir::Value CodeGen::getMLIRArrayBinaryOp(mlir::Value lhsVal,
+                                          mlir::Value rhsVal,
+                                          fc::ast::BinaryOpKind opKind) {
+
+  assert(lhsVal && rhsVal);
+
+  auto lhsArrTy = lhsVal.getType().cast<FC::ArrayType>();
+  auto rhsArrTy = rhsVal.getType().cast<FC::ArrayType>();
+  auto isInteger = lhsArrTy.getEleTy().isIntOrIndex();
+  auto isRHSInteger = rhsArrTy.getEleTy().isIntOrIndex();
+  auto loc = lhsVal.getLoc();
+  assert(isInteger == isRHSInteger);
 
   switch (opKind) {
-  case RelationalOpKind::EQ:
-    return IRB->CreateICmpEQ(cmpVal, IRB->getInt32(0));
-  case RelationalOpKind::NE:
-    return IRB->CreateICmpNE(cmpVal, IRB->getInt32(0));
-  default:
-    llvm_unreachable("String comparision of this type is not handled yet");
+  case BinaryOpKind::Addition: {
+    if (isInteger)
+      return builder.create<FC::ArrayAddIOp>(loc, lhsVal, rhsVal).getResult();
+    return builder.create<FC::ArrayAddFOp>(loc, lhsVal, rhsVal).getResult();
   }
+  case BinaryOpKind::Subtraction: {
+    if (isInteger)
+      return builder.create<FC::ArraySubIOp>(loc, lhsVal, rhsVal).getResult();
+    return builder.create<FC::ArraySubFOp>(loc, lhsVal, rhsVal).getResult();
+  }
+  case BinaryOpKind::Multiplication: {
+    if (isInteger)
+      return builder.create<FC::ArrayMulIOp>(loc, lhsVal, rhsVal).getResult();
+    return builder.create<FC::ArrayMulFOp>(loc, lhsVal, rhsVal).getResult();
+  }
+  case BinaryOpKind::Division: {
+    if (isInteger)
+      return builder.create<FC::ArrayDivIOp>(loc, lhsVal, rhsVal).getResult();
+    return builder.create<FC::ArrayDivFOp>(loc, lhsVal, rhsVal).getResult();
+  }
+  case BinaryOpKind::Mod: {
+    if (isInteger)
+      return builder.create<FC::ArrayModIOp>(loc, lhsVal, rhsVal).getResult();
+    return builder.create<FC::ArrayModFOp>(loc, lhsVal, rhsVal).getResult();
+  }
+  default: { llvm_unreachable("unhandled binary expresssion"); }
+  };
 }
 
-llvm::Value *CodeGen::getLLVMRelationalOp(llvm::Value *lhsVal,
-                                          llvm::Value *rhsVal,
-                                          RelationalOpKind opKind) {
+// FIXME: This is not elementwise compare. Currently works for
+// strcmp like usecases.
+mlir::Value CodeGen::getMLIRArrayRelationalOp(mlir::Value lhsVal,
+                                              mlir::Value rhsVal,
+                                              RelationalOpKind opKind) {
 
-  auto isInteger = lhsVal->getType()->isIntegerTy();
+  assert(lhsVal && rhsVal);
+
+  auto lhsArrTy = lhsVal.getType().cast<FC::ArrayType>();
+  auto rhsArrTy = rhsVal.getType().cast<FC::ArrayType>();
+  auto isInteger = lhsArrTy.getEleTy().isIntOrIndex();
+  auto isRHSInteger = rhsArrTy.getEleTy().isIntOrIndex();
+  auto loc = lhsVal.getLoc();
+  assert(isInteger == isRHSInteger);
+
   switch (opKind) {
   case RelationalOpKind::EQ:
     if (isInteger)
-      return IRB->CreateICmpEQ(lhsVal, rhsVal);
-    // TODO: using ordered float compare. Refer to fortran standard.
-    return IRB->CreateFCmpOEQ(lhsVal, rhsVal);
+      return builder.create<FC::ArrayCmpIOp>(loc, mlir::CmpIPredicate::eq,
+                                             lhsVal, rhsVal);
+    return builder.create<FC::ArrayCmpFOp>(loc, mlir::CmpFPredicate::OEQ,
+                                           lhsVal, rhsVal);
   case RelationalOpKind::NE:
     if (isInteger)
-      return IRB->CreateICmpNE(lhsVal, rhsVal);
-    return IRB->CreateFCmpONE(lhsVal, rhsVal);
+      return builder.create<FC::ArrayCmpIOp>(loc, mlir::CmpIPredicate::ne,
+                                             lhsVal, rhsVal);
+    return builder.create<FC::ArrayCmpFOp>(loc, mlir::CmpFPredicate::ONE,
+                                           lhsVal, rhsVal);
   case RelationalOpKind::LT:
     if (isInteger)
-      return IRB->CreateICmpSLT(lhsVal, rhsVal);
-    return IRB->CreateFCmpOLT(lhsVal, rhsVal);
+      return builder.create<FC::ArrayCmpIOp>(loc, mlir::CmpIPredicate::slt,
+                                             lhsVal, rhsVal);
+    return builder.create<FC::ArrayCmpFOp>(loc, mlir::CmpFPredicate::OLT,
+                                           lhsVal, rhsVal);
   case RelationalOpKind::LE:
     if (isInteger)
-      return IRB->CreateICmpSLE(lhsVal, rhsVal);
-    return IRB->CreateFCmpOLE(lhsVal, rhsVal);
+      return builder.create<FC::ArrayCmpIOp>(loc, mlir::CmpIPredicate::sle,
+                                             lhsVal, rhsVal);
+    return builder.create<FC::ArrayCmpFOp>(loc, mlir::CmpFPredicate::OLE,
+                                           lhsVal, rhsVal);
   case RelationalOpKind::GT:
     if (isInteger)
-      return IRB->CreateICmpSGT(lhsVal, rhsVal);
-    return IRB->CreateFCmpOGT(lhsVal, rhsVal);
+      return builder.create<FC::ArrayCmpIOp>(loc, mlir::CmpIPredicate::sgt,
+                                             lhsVal, rhsVal);
+    return builder.create<FC::ArrayCmpFOp>(loc, mlir::CmpFPredicate::OGT,
+                                           lhsVal, rhsVal);
   case RelationalOpKind::GE:
     if (isInteger)
-      return IRB->CreateICmpSGE(lhsVal, rhsVal);
-    return IRB->CreateFCmpOGE(lhsVal, rhsVal);
+      return builder.create<FC::ArrayCmpIOp>(loc, mlir::CmpIPredicate::sge,
+                                             lhsVal, rhsVal);
+    return builder.create<FC::ArrayCmpFOp>(loc, mlir::CmpFPredicate::OGE,
+                                           lhsVal, rhsVal);
+  default:
+    llvm_unreachable("unhandled relational op");
+  };
+  return nullptr;
+}
+
+mlir::Value CodeGen::getMLIRRelationalOp(mlir::Value lhsVal, mlir::Value rhsVal,
+                                         RelationalOpKind opKind) {
+
+  assert(lhsVal && rhsVal);
+
+  auto isInteger = lhsVal.getType().isIntOrIndex();
+  auto isRHSInteger = rhsVal.getType().isIntOrIndex();
+  auto loc = lhsVal.getLoc();
+  assert(isInteger == isRHSInteger);
+  if (isInteger && isRHSInteger) {
+    if (lhsVal.getType().isIndex() != rhsVal.getType().isIndex())
+      lhsVal = emitCastExpr(lhsVal, rhsVal.getType());
+  }
+  switch (opKind) {
+  case RelationalOpKind::EQ:
+    if (isInteger)
+      return builder.create<mlir::CmpIOp>(loc, mlir::CmpIPredicate::eq, lhsVal,
+                                          rhsVal);
+    return builder.create<mlir::CmpFOp>(loc, mlir::CmpFPredicate::OEQ, lhsVal,
+                                        rhsVal);
+  case RelationalOpKind::NE:
+    if (isInteger)
+      return builder.create<mlir::CmpIOp>(loc, mlir::CmpIPredicate::ne, lhsVal,
+                                          rhsVal);
+    return builder.create<mlir::CmpFOp>(loc, mlir::CmpFPredicate::ONE, lhsVal,
+                                        rhsVal);
+  case RelationalOpKind::LT:
+    if (isInteger)
+      return builder.create<mlir::CmpIOp>(loc, mlir::CmpIPredicate::slt, lhsVal,
+                                          rhsVal);
+    return builder.create<mlir::CmpFOp>(loc, mlir::CmpFPredicate::OLT, lhsVal,
+                                        rhsVal);
+  case RelationalOpKind::LE:
+    if (isInteger)
+      return builder.create<mlir::CmpIOp>(loc, mlir::CmpIPredicate::sle, lhsVal,
+                                          rhsVal);
+    return builder.create<mlir::CmpFOp>(loc, mlir::CmpFPredicate::OLE, lhsVal,
+                                        rhsVal);
+  case RelationalOpKind::GT:
+    if (isInteger)
+      return builder.create<mlir::CmpIOp>(loc, mlir::CmpIPredicate::sgt, lhsVal,
+                                          rhsVal);
+    return builder.create<mlir::CmpFOp>(loc, mlir::CmpFPredicate::OGT, lhsVal,
+                                        rhsVal);
+  case RelationalOpKind::GE:
+    if (isInteger)
+      return builder.create<mlir::CmpIOp>(loc, mlir::CmpIPredicate::sge, lhsVal,
+                                          rhsVal);
+    return builder.create<mlir::CmpFOp>(loc, mlir::CmpFPredicate::OGE, lhsVal,
+                                        rhsVal);
   default:
     llvm_unreachable("unhandled llvm  relational op");
   };
   return nullptr;
 }
 
-llvm::Value *CodeGen::getLLVMLogicalOp(llvm::Value *lhsVal, llvm::Value *rhsVal,
-                                       LogicalOpKind opKind) {
-  if (opKind != LogicalOpKind::NOT)
-    assert(lhsVal->getType()->isIntegerTy(1) && "Expecting logical value");
-  assert(rhsVal->getType()->isIntegerTy(1) && "Expecting logical value");
+mlir::Value CodeGen::getMLIRLogicalOp(mlir::Value lhsVal, mlir::Value rhsVal,
+                                      LogicalOpKind opKind) {
+  auto loc = rhsVal.getLoc();
   switch (opKind) {
   case LogicalOpKind::AND:
-    return IRB->CreateAnd(lhsVal, rhsVal);
-  case LogicalOpKind::NOT:
-    return IRB->CreateNot(rhsVal);
+    return builder.create<mlir::AndOp>(loc, lhsVal, rhsVal);
   case LogicalOpKind::OR:
-    return IRB->CreateOr(lhsVal, rhsVal);
+    return builder.create<mlir::OrOp>(loc, lhsVal, rhsVal);
   case LogicalOpKind::NEQV:
-    return IRB->CreateXor(lhsVal, rhsVal);
+    return builder.create<mlir::CmpIOp>(loc, mlir::CmpIPredicate::ne, lhsVal,
+                                        rhsVal);
   case LogicalOpKind::EQV:
-    return IRB->CreateNot(IRB->CreateXor(lhsVal, rhsVal));
+    return builder.create<mlir::CmpIOp>(loc, mlir::CmpIPredicate::eq, lhsVal,
+                                        rhsVal);
+  case LogicalOpKind::NOT: {
+    auto trueVal =
+        builder.create<mlir::ConstantIntOp>(loc, 1, builder.getIntegerType(1));
+    auto falseVal =
+        builder.create<mlir::ConstantIntOp>(loc, 0, builder.getIntegerType(1));
+    return builder.create<mlir::SelectOp>(loc, rhsVal, falseVal, trueVal);
+  }
   default:
     llvm_unreachable("unhandled logical op");
   }
   return nullptr;
 }
 
-Value *CodeGen::emitSizeForArrBounds(ArrayBounds &bounds) {
-  llvm::Value *lowerVal = nullptr;
-  lowerVal = IRB->getInt64(bounds.first);
-  auto upperVal = IRB->getInt64(bounds.second);
+mlir::Value CodeGen::emitSizeForArrBounds(ArrayBounds &bounds) {
+  mlir::Value lowerVal = nullptr;
+  auto mlirloc = builder.getUnknownLoc();
+  lowerVal = builder.create<mlir::ConstantIntOp>(mlirloc, bounds.first, 64);
+  auto upperVal =
+      builder.create<mlir::ConstantIntOp>(mlirloc, bounds.second, 64);
 
   // Size of the current dimension is {upper - lower + 1}
-  auto sizeVal = IRB->CreateSub(upperVal, lowerVal);
-  sizeVal = IRB->CreateAdd(sizeVal, IRB->getInt64(1));
+  auto sizeVal =
+      builder.create<mlir::SubIOp>(mlirloc, upperVal, lowerVal).getResult();
+  auto constOne = builder.create<mlir::ConstantIntOp>(mlirloc, 1, 64);
+  sizeVal = builder.create<mlir::AddIOp>(mlirloc, sizeVal, constOne);
   return sizeVal;
 }
 
-Value *CodeGen::emitDynArrayElement(ArrayElement *arrEle, bool isLHS,
-                                    llvm::Value *addr) {
-  llvm::Value *LLValue;
-
-  if (!addr)
-    LLValue = context.getLLVMValueFor(arrEle->getName());
-  else
-    LLValue = addr;
-
-  auto fcTy = arrEle->getSymbol()->getOrigType();
-
-  fc::ArrayType *fcArrayTy;
-  if (auto fcPointerTy = llvm::dyn_cast<fc::PointerType>(fcTy)) {
-    fcArrayTy = llvm::dyn_cast<fc::ArrayType>(fcPointerTy->getElementType());
-
-    if (isLHS)
-      LLValue =
-          emitLoadInstruction(LLValue, LLValue->getName().str() + ".loadptr",
-                              /* disableTBAA = */ true);
-
-  } else {
-    fcArrayTy = llvm::dyn_cast<fc::ArrayType>(fcTy);
-  }
-
-  assert(fcArrayTy && fcArrayTy->getBoundsList().empty());
-
-  auto llStructTy = LLVMUtil::getStructTypeForAlloc(LLValue);
-  auto llArrTy = dyn_cast<llvm::ArrayType>(llStructTy->getContainedType(1));
-  assert(llArrTy);
-
-  auto list = arrEle->getSubscriptList();
-
-  // FIXME
-  // Not necessarily true, for example,
-  // character(line_length), dimension(:), intent(in) :: keywords
-  // or we have to push nullptr to dimsarray!
-  // assert(numDims == list.size());
-
-  auto numDims = list.size();
-  // First emit all the subs.
-  llvm::SmallVector<llvm::Value *, 2> llSubs, LBs, SizeList;
-  for (auto expr : list) {
-    auto llExpr = emitExpression(expr);
-    assert(llExpr);
-    llExpr = IRB->CreateSExt(llExpr, IRB->getInt64Ty());
-    llSubs.push_back(llExpr);
-  }
-
-  // Load the array type.
-  auto DimArr = IRB->CreateStructGEP(nullptr, LLValue, 1, "dimsArr");
-  // Get lower bound and size list of each dimension.
-  for (unsigned I = 0; I < numDims; ++I) {
-
-    auto Dim = IRB->CreateInBoundsGEP(
-        DimArr, {IRB->getInt32(0), IRB->getInt32(I)}, "dim");
-
-    auto LB = IRB->CreateStructGEP(nullptr, Dim, 0, "lb");
-    // LB = emitLoadInstruction(LB, "lb.load");
-    LB = emitStructLoadInst(LB, Dim, Dim->getType(), 0, "lb.load");
-    LBs.push_back(LB);
-
-    if (I < numDims - 1) {
-      auto Size = IRB->CreateStructGEP(nullptr, Dim, 2, "size");
-      Size = emitStructLoadInst(Size, Dim, Dim->getType(), 2, "size.load");
-      SizeList.push_back(Size);
-    }
-  }
-
-  // Get the actual offset for every dimension.
-  for (unsigned I = 1; I < SizeList.size(); ++I) {
-    SizeList[I] = IRB->CreateMul(SizeList[I - 1], SizeList[I],
-                                 "size" + std::to_string(I + 1));
-  }
-
-  llvm::Value *offsetVal = nullptr;
-  for (unsigned I = numDims - 1; I >= 0; --I) {
-    auto sub = llSubs[I];
-    auto LB = LBs[I];
-
-    if (sub->getType()->isIntegerTy(32)) {
-      sub = IRB->CreateSExt(sub, LB->getType());
-    }
-    if (I == 0) {
-      if (offsetVal) {
-        offsetVal = IRB->CreateSub(offsetVal, LB, "negatelast");
-        offsetVal = IRB->CreateAdd(offsetVal, sub, "addsub");
-      } else {
-        offsetVal = IRB->CreateSub(sub, LB);
-      }
-      break;
-    }
-
-    llvm::Value *currExprVal = nullptr;
-    // Multiply the expression with other upper dimension.
-    auto currDim = IRB->CreateMul(sub, SizeList[I - 1]);
-    auto minusLB = IRB->CreateMul(LB, SizeList[I - 1], "negate");
-    currExprVal = IRB->CreateSub(currDim, minusLB);
-    if (I == numDims - 1)
-      offsetVal = currExprVal;
-    else
-      offsetVal = IRB->CreateAdd(offsetVal, currExprVal);
-  }
-
-  auto CurrBase = IRB->CreateStructGEP(nullptr, LLValue, 0, "base");
-  // CurrBase = emitLoadInstruction(CurrBase, "base.load");
-  CurrBase =
-      emitStructLoadInst(CurrBase, LLValue, LLValue->getType(), 0, "base");
-
-  CurrBase = IRB->CreateInBoundsGEP(
-      CurrBase, offsetVal, arrEle->getName() + (isLHS ? ".write" : ".read"));
-
-  if (isLHS)
-    return CurrBase;
-
-  return emitLoadInstruction(CurrBase, arrEle->getName() + ".read");
+mlir::Value CodeGen::emitDynArrayElement(ArrayElement *arrEle, bool isLHS,
+                                         mlir::Value addr) {
+  llvm_unreachable("Dynamic array element");
 }
 
-Value *CodeGen::emitf77DynArrayElement(ArrayElement *arrEle, bool isLHS,
-                                       llvm::Value *addr) {
-  llvm::Value *LLValue;
-  if (!addr)
-    LLValue = context.getLLVMValueFor(arrEle->getName());
-  else
-    LLValue = addr;
-
-  auto fcTy = arrEle->getSymbol()->getOrigType();
-  auto fcArrayTy = llvm::dyn_cast<fc::ArrayType>(fcTy);
-
-  auto numDims = fcArrayTy->getNumDims();
-
-  auto arrSpec =
-      context.currPU->getSpec()->getArraySpecFor(arrEle->getSymbol());
-  assert(arrSpec);
-
-  auto boundsList = arrSpec->getBoundsList();
-  auto list = arrEle->getSubscriptList();
-  assert(numDims == list.size());
-
-  // First emit all the subs.
-  llvm::SmallVector<llvm::Value *, 2> llSubs, LBs, SizeList;
-  for (auto expr : list) {
-    auto llExpr = emitExpression(expr);
-    assert(llExpr);
-    llExpr = IRB->CreateSExt(llExpr, IRB->getInt64Ty());
-    llSubs.push_back(llExpr);
-  }
-
-  // Load the array type.
-  // Get lower bound and size list of each dimension.
-  for (unsigned I = 0; I < numDims; ++I) {
-
-    auto LB = emitExpression(boundsList[I].first);
-    LB = IRB->CreateSExt(LB, IRB->getInt64Ty());
-    LBs.push_back(LB);
-
-    // We do not need to compute last dimension.
-    if (I < numDims - 1) {
-      auto UB = emitExpression(boundsList[I].second);
-      UB = IRB->CreateSExt(UB, IRB->getInt64Ty());
-      auto sizeVal = IRB->CreateSub(UB, LB, "sizeMinus1");
-      sizeVal = IRB->CreateAdd(sizeVal, IRB->getInt64(1),
-                               "size_of_" + std::to_string(I + 1));
-      SizeList.push_back(sizeVal);
-    }
-  }
-
-  // Get the actual offset for every dimension.
-  for (unsigned I = 1; I < SizeList.size(); ++I) {
-    SizeList[I] = IRB->CreateMul(SizeList[I - 1], SizeList[I],
-                                 "size" + std::to_string(I + 1));
-  }
-
-  llvm::Value *offsetVal = nullptr;
-  for (unsigned I = numDims - 1; I >= 0; --I) {
-    auto sub = llSubs[I];
-    auto LB = LBs[I];
-    if (sub->getType()->isIntegerTy(32)) {
-      sub = IRB->CreateSExt(sub, LB->getType());
-    }
-    if (I == 0) {
-      if (offsetVal) {
-        offsetVal = IRB->CreateSub(offsetVal, LB, "negatelast");
-        offsetVal = IRB->CreateAdd(offsetVal, sub, "addsub");
-      } else {
-        offsetVal = IRB->CreateSub(sub, LB);
-      }
-      break;
-    }
-
-    llvm::Value *currExprVal = nullptr;
-    // Multiply the expression with other upper dimension.
-    auto currDim = IRB->CreateMul(sub, SizeList[I - 1]);
-    auto minusLB = IRB->CreateMul(LB, SizeList[I - 1], "negate");
-    currExprVal = IRB->CreateSub(currDim, minusLB);
-    if (I == numDims - 1)
-      offsetVal = currExprVal;
-    else
-      offsetVal = IRB->CreateAdd(offsetVal, currExprVal);
-  }
-
-  auto CurrBase = LLValue;
-  CurrBase = IRB->CreateInBoundsGEP(
-      CurrBase, offsetVal, arrEle->getName() + (isLHS ? ".write" : ".read"));
-  if (isLHS)
-    return CurrBase;
-
-  return emitLoadInstruction(CurrBase, arrEle->getName() + ".read");
+mlir::Value CodeGen::emitf77DynArrayElement(ArrayElement *arrEle, bool isLHS,
+                                            mlir::Value addr) {
+  llvm_unreachable("Dynamic array element");
 }
 
-llvm::Value *CodeGen::expandIntrinsic(FunctionReference *funcReference) {
+mlir::Value CodeGen::expandIntrinsic(FunctionReference *funcReference) {
+
   auto sym = funcReference->getSymbol()->getOrigSymbol();
+  auto loc = getLoc(funcReference->getSourceLoc());
   auto argList = funcReference->getArgsList();
 
   auto intrinKind = fc::intrin::getIntrinsicKind(sym->getName());
   switch (intrinKind) {
-  case fc::intrin::real: {
-    assert(argList.size() == 1);
-    auto expr = argList[0];
-    llvm::Value *arg = emitExpression(expr);
-
-    if (arg->getType()->isIntegerTy())
-      return IRB->CreateSIToFP(arg, IRB->getFloatTy(), "realIntrin");
-    else if (arg->getType()->isDoubleTy())
-      return IRB->CreateFPCast(arg, IRB->getFloatTy(), "realIntrin");
-    llvm_unreachable("Unhanled type in real intrinsic");
+  case fc::intrin::mod: {
+    assert(argList.size() == 2);
+    return getMLIRBinaryOp(emitExpression(argList[0]),
+                           emitExpression(argList[1]), BinaryOpKind::Mod);
   }
-  case fc::intrin::sin: {
-    assert(argList.size() == 1);
-    llvm::Value *args = {emitExpression(argList[0])};
-    return IRB->CreateIntrinsic(llvm::Intrinsic::sin, args, nullptr, "sinVal");
-  }
-  case fc::intrin::cos: {
-    assert(argList.size() == 1);
-    llvm::Value *args = {emitExpression(argList[0])};
-    return IRB->CreateIntrinsic(llvm::Intrinsic::cos, args, nullptr, "cosVal");
+  case fc::intrin::command_argument_count: {
+    assert(argList.size() == 0);
+    return builder.create<FC::ArgcOp>(loc, builder.getIntegerType(32))
+        .getResult();
   }
   case fc::intrin::exp: {
     assert(argList.size() == 1);
-    llvm::Value *args = {emitExpression(argList[0])};
-    return IRB->CreateIntrinsic(llvm::Intrinsic::exp, args, nullptr, "expVal");
+    auto Val = emitExpression(argList[0]);
+    return builder.create<mlir::ExpOp>(loc, Val.getType(), Val);
   }
   case fc::intrin::sqrt: {
     assert(argList.size() == 1);
-    llvm::Value *args[] = {emitExpression(argList[0])};
-    return IRB->CreateIntrinsic(llvm::Intrinsic::sqrt, args, nullptr,
-                                "sqrtVal");
+    auto arg = emitExpression(argList[0]);
+    auto type = arg.getType();
+    assert(type.isF32() || type.isF64());
+    auto sqrtFn = getIntrinFunction("llvm.sqrt", type);
+    auto callOp = builder.create<FC::FCCallOp>(
+        arg.getLoc(), sqrtFn, llvm::ArrayRef<mlir::Type>{type},
+        llvm::ArrayRef<mlir::Value>{arg});
+    return callOp.getResult(0);
   }
   case fc::intrin::abs: {
     assert(argList.size() == 1);
-    llvm::Value *args[] = {emitExpression(argList[0])};
-    return IRB->CreateIntrinsic(llvm::Intrinsic::fabs, args, nullptr, "absVal");
-  }
-  case fc::intrin::log: {
-    assert(argList.size() == 1);
-    llvm::Value *args[] = {emitExpression(argList[0])};
-    return IRB->CreateIntrinsic(llvm::Intrinsic::log, args, nullptr, "logVal");
+    // Integer abs is lowered in sema
+    auto val = emitExpression(argList[0]);
+    auto type = val.getType();
+    auto absFn = getIntrinFunction("llvm.fabs", type);
+    auto callOp = builder.create<FC::FCCallOp>(
+        val.getLoc(), absFn, llvm::ArrayRef<mlir::Type>{type},
+        llvm::ArrayRef<mlir::Value>{val});
+    return callOp.getResult(0);
   }
   case fc::intrin::max: {
     assert(argList.size() == 2);
-    llvm::Value *args[] = {emitExpression(argList[0]),
-                           emitExpression(argList[1])};
-
-    auto cmp = IRB->CreateFCmpOGT(args[0], args[1]);
-    return IRB->CreateSelect(cmp, args[0], args[1]);
-  }
-  case fc::intrin::min: {
-    assert(argList.size() == 2);
-    llvm::Value *args[] = {emitExpression(argList[0]),
-                           emitExpression(argList[1])};
-    return IRB->CreateIntrinsic(llvm::Intrinsic::minnum, args, nullptr,
-                                "minVal");
-  }
-  case fc::intrin::INT: {
-    assert(argList.size() == 1);
-    return IRB->CreateFPToSI(emitExpression(argList[0]), IRB->getInt32Ty());
-  }
-  case fc::intrin::mod: {
-    assert(argList.size() == 2);
-    return IRB->CreateSRem(emitExpression(argList[0]),
-                           emitExpression(argList[1]), "mod.val");
+    // Integer max is lowered in sema
+    auto arg1 = emitExpression(argList[0]);
+    auto arg2 = emitExpression(argList[1]);
+    auto toType = arg1.getType();
+    arg1 = emitCastExpr(arg1, builder.getF64Type());
+    arg2 = emitCastExpr(arg2, builder.getF64Type());
+    auto maxFn = getFmaxFunction();
+    auto F64 = builder.getF64Type();
+    auto callOp = builder.create<FC::FCCallOp>(
+        arg1.getLoc(), maxFn, llvm::ArrayRef<mlir::Type>{F64},
+        llvm::ArrayRef<mlir::Value>{arg1, arg2});
+    return emitCastExpr(callOp.getResult(0), toType);
   }
   case fc::intrin::lbound: {
     assert(argList.size() == 2);
@@ -640,18 +583,13 @@ llvm::Value *CodeGen::expandIntrinsic(FunctionReference *funcReference) {
     if (std == Standard::f77) {
       assert(false);
     }
-    llvm::Value *dimension = emitExpression(argList[1]);
-    dimension = IRB->CreateSub(dimension, IRB->getInt32(1), "size.sub");
-
-    auto LLValue = emitExpression(argList[0]);
-    auto DimArr = IRB->CreateStructGEP(nullptr, LLValue, 1, "dimsArr");
-    auto Dim =
-        IRB->CreateInBoundsGEP(DimArr, {IRB->getInt32(0), dimension}, "dim");
-
-    auto Size = IRB->CreateStructGEP(nullptr, Dim, 0, "lb");
-    // auto lbLoad = emitLoadInstruction(Size, "lb.load");
-    auto lbLoad = emitStructLoadInst(Size, Dim, Dim->getType(), 0, "lb.load");
-    return IRB->CreateTrunc(lbLoad, IRB->getInt32Ty());
+    mlir::Value dimension = emitExpression(argList[1]);
+    dimension = castToIndex(dimension);
+    auto LLValue = emitExpression(argList[0], true);
+    return builder
+        .create<FC::LBoundOp>(dimension.getLoc(), builder.getIndexType(),
+                              LLValue, dimension)
+        .getResult();
   }
   case fc::intrin::ubound: {
     assert(argList.size() == 2);
@@ -659,393 +597,262 @@ llvm::Value *CodeGen::expandIntrinsic(FunctionReference *funcReference) {
     if (std == Standard::f77) {
       assert(false);
     }
-    llvm::Value *dimension = emitExpression(argList[1]);
-    dimension = IRB->CreateSub(dimension, IRB->getInt32(1), "size.sub");
-    auto LLValue = emitExpression(argList[0]);
-    auto DimArr = IRB->CreateStructGEP(nullptr, LLValue, 1, "dimsArr");
-    auto Dim =
-        IRB->CreateInBoundsGEP(DimArr, {IRB->getInt32(0), dimension}, "dim");
-
-    auto Size = IRB->CreateStructGEP(nullptr, Dim, 1, "ub");
-    // auto lbLoad = emitLoadInstruction(Size, "ub.load");
-    auto ubLoad = emitStructLoadInst(Size, Dim, Dim->getType(), 1, "ub.load");
-    return IRB->CreateTrunc(ubLoad, IRB->getInt32Ty());
+    mlir::Value dimension = emitExpression(argList[1]);
+    dimension = castToIndex(dimension);
+    auto LLValue = emitExpression(argList[0], true);
+    return builder
+        .create<FC::UBoundOp>(dimension.getLoc(), builder.getIndexType(),
+                              LLValue, dimension)
+        .getResult();
   }
-  case fc::intrin::command_argument_count: {
-    assert(argList.size() == 0);
-    auto LI = emitLoadInstruction(context.ArgC);
-    return IRB->CreateSub(LI, IRB->getInt32(1), "argc");
+  case fc::intrin::INT: {
+    assert(argList.size() == 1);
+    return builder.create<FC::CastOp>(loc, builder.getIntegerType(32),
+                                      emitExpression(argList[0]));
   }
   case fc::intrin::iachar: {
     assert(argList.size() == 1);
-    llvm::Value *charValue = emitExpression(argList[0]);
-    return IRB->CreateSExt(charValue, IRB->getInt32Ty());
+    auto charValue = emitExpression(argList[0]);
+    return builder.create<mlir::SignExtendIOp>(loc, charValue,
+                                               builder.getIntegerType(32));
   }
-  case fc::intrin::allocated: {
+  case fc::intrin::real: {
     assert(argList.size() == 1);
-    auto expr = emitExpression(argList[0], true);
-    auto isAllocated = IRB->CreateStructGEP(nullptr, expr, 2, "flag");
-    return emitLoadInstruction(isAllocated, "isAllocated", true);
+    auto F32 = mlir::FloatType::get(mlir::StandardTypes::F32, &mlirContext);
+    auto inputVal = emitExpression(argList[0]);
+    if (inputVal.getType().isF64()) {
+      return builder.create<mlir::FPTruncOp>(loc, F32, inputVal);
+    }
+    if (inputVal.getType().isF32()) {
+      return inputVal;
+    }
+    if (inputVal.getType().isIntOrIndex()) {
+      return builder.create<mlir::SIToFPOp>(loc, inputVal, F32);
+    }
+    assert(false && "unknown type for real() intrinsic");
   }
-  case fc::intrin::present: {
+  case fc::intrin::cos: {
     assert(argList.size() == 1);
-    auto expr = emitExpression(argList[0], true);
-    return IRB->CreateIsNotNull(expr, "presentIntrin");
+    auto arg = emitExpression(argList[0]);
+    auto argType = arg.getType();
+    assert(argType.isF32() || argType.isF64());
+    auto cosFn = getIntrinFunction("llvm.cos", argType);
+    auto callOp = builder.create<FC::FCCallOp>(
+        arg.getLoc(), cosFn, llvm::ArrayRef<mlir::Type>{argType},
+        llvm::ArrayRef<mlir::Value>{arg});
+    return callOp.getResult(0);
+    break;
   }
-  case fc::intrin::associated: {
-    assert(argList.size() == 1); // TODO: Handle the second arg
-    llvm::Value *expr;
-
-    // FIXME: This is a temporary solution, we need isLHS for emitExpression to
-    // be more general by considering whether the expr is in a pointer
-    // assignment.
-    if (!llvm::isa<StructureComponent>(argList[0]))
-      expr = emitExpression(argList[0], /* isLHS */ true);
-    else
-      expr = emitExpression(argList[0], /* isLHS */ false);
-
-    return IRB->CreateIsNotNull(expr, "associated");
+  case fc::intrin::sin: {
+    assert(argList.size() == 1);
+    auto arg = emitExpression(argList[0]);
+    auto argType = arg.getType();
+    assert(argType.isF32() || argType.isF64());
+    auto sinFn = getIntrinFunction("llvm.sin", argType);
+    auto callOp = builder.create<FC::FCCallOp>(
+        arg.getLoc(), sinFn, llvm::ArrayRef<mlir::Type>{argType},
+        llvm::ArrayRef<mlir::Value>{arg});
+    return callOp.getResult(0);
+    break;
+  }
+  case fc::intrin::log: {
+    assert(argList.size() == 1);
+    auto arg = emitExpression(argList[0]);
+    auto argType = arg.getType();
+    assert(argType.isF32() || argType.isF64());
+    auto logFn = getIntrinFunction("llvm.log", argType);
+    auto callOp = builder.create<FC::FCCallOp>(
+        arg.getLoc(), logFn, llvm::ArrayRef<mlir::Type>{argType},
+        llvm::ArrayRef<mlir::Value>{arg});
+    return callOp.getResult(0);
+    break;
   }
   default:
     return nullptr;
   };
 }
 
-Value *CodeGen::emitStaticArrayElement(ArrayElement *arrEle, bool isLHS,
-                                       llvm::Value *addr) {
-  llvm::Value *LLValue;
-  if (!addr)
-    LLValue = context.getLLVMValueFor(arrEle->getName());
-  else
-    LLValue = addr;
+mlir::Value CodeGen::emitStaticArrayElement(ArrayElement *arrEle, bool isLHS,
+                                            mlir::Value addr) {
+  llvm_unreachable("static array element");
+}
+
+mlir::Value CodeGen::emitFCArrayElement(ArrayElement *arrEle) {
+  auto mlirloc = getLoc(arrEle->getSourceLoc());
+  auto Alloca = context.symbolMap[arrEle->getSymbol()->getName()];
+  assert(Alloca);
+  llvm::SmallVector<mlir::Value, 2> subs;
+
+  auto one = builder.create<mlir::ConstantIndexOp>(mlirloc, 0);
+  assert(arrEle->getSubscriptList().size() == 1);
+  for (auto sub : arrEle->getSubscriptList()) {
+    auto tempSub = emitExpression(sub);
+    if (!tempSub.getType().isa<mlir::IndexType>()) {
+      tempSub = builder.create<mlir::IndexCastOp>(mlirloc, tempSub,
+                                                  builder.getIndexType());
+    }
+    subs.push_back(tempSub);
+  }
+
+  auto arrayTy = llvm::dyn_cast<fc::ArrayType>(arrEle->getType());
+  assert(arrayTy);
+  bool isPartial = false;
+  for (unsigned i = subs.size(); i < arrayTy->getNumDims(); ++i) {
+    // TODO Push lbound
+    subs.push_back(one);
+    isPartial = true;
+  }
+
+  if (arrayTy->isStringArrTy() && isPartial) {
+    std::reverse(subs.begin(), subs.end());
+  }
+
+  auto retType =
+      FC::RefType::get(cgHelper->getMLIRTypeFor(arrEle->getElementType()));
+  auto arrayOp = builder.create<FC::ArrayEleOp>(mlirloc, retType, Alloca, subs);
+  return arrayOp.getResult();
+}
+
+mlir::Value CodeGen::emitArrayElement(ArrayElement *arrEle, bool isLHS,
+                                      mlir::Value addr) {
+  auto mlirloc = getLoc(arrEle->getSourceLoc());
+  auto Alloca = context.symbolMap[arrEle->getSymbol()->getName()];
+  assert(Alloca);
+  FC::SubscriptRangeList subs;
 
   auto fcTy = arrEle->getSymbol()->getOrigType();
   auto fcArrayTy = llvm::dyn_cast<fc::ArrayType>(fcTy);
   assert(fcArrayTy);
-
-  llvm::Type *LLBaseTy = LLVMUtil::getLLVMArrayBaseType(LLValue->getType());
-  assert(LLBaseTy);
-
-  auto boundsList = fcArrayTy->getBoundsList();
-  auto CurrBase = LLValue;
-  llvm::Value *offsetVal = nullptr;
-  auto numDims = fcArrayTy->getNumDims();
-
-  // if (!fcArrayTy->isStringCharTy()) {
-  //   assert(arrEle->getNumOperands() - 1 == boundsList.size());
-  // }
-  //
-  auto list = arrEle->getSubscriptList();
-
   bool isString = false;
   if (fcArrayTy->getElementTy()->isStringCharTy()) {
     isString = true;
   }
 
-  if (list.size() != numDims) {
-    for (unsigned i = 0; i < list.size(); ++i) {
-      auto expr = arrEle->getSubsExpr(i);
-      auto exprVal = emitExpression(expr);
-      if (isString) {
-        exprVal = IRB->CreateSub(exprVal, IRB->getInt32(1));
-      }
+  bool isPartial = false;
+  if (arrEle->getSubscriptList().size() < fcArrayTy->getNumDims())
+    isPartial = true;
 
-      exprVal = IRB->CreateSExt(exprVal, IRB->getInt64Ty());
-
-      llvm::Value *size = nullptr;
-      // Multiply the expression with other upper dimensions.
-      for (unsigned j = boundsList.size() - 1; j > i; j--) {
-        auto currSize = emitSizeForArrBounds(boundsList[j]);
-        if (!size) {
-          size = currSize;
-          continue;
-        }
-        size = IRB->CreateMul(size, currSize);
-      }
-      offsetVal = IRB->CreateMul(size, exprVal);
-    }
-
-  } else {
-
-    // First emit all the subs.
-    llvm::SmallVector<llvm::Value *, 2> llSubs, LBs, SizeList;
-    for (auto expr : list) {
-      auto llExpr = emitExpression(expr);
-      assert(llExpr);
-      if (isString) {
-        llExpr = IRB->CreateSub(llExpr, IRB->getInt32(1));
-      }
-      llExpr = IRB->CreateSExt(llExpr, IRB->getInt64Ty());
-      llSubs.push_back(llExpr);
-    }
-
-    // Load the array type.
-    // Get lower bound and size list of each dimension.
-    for (unsigned I = 0; I < numDims; ++I) {
-
-      auto LB = IRB->getInt64(boundsList[I].first);
-      LBs.push_back(LB);
-
-      // We do not need to compute last dimension.
-      if (I < numDims - 1) {
-        auto UB = IRB->getInt64(boundsList[I].second);
-        auto sizeVal = IRB->CreateSub(UB, LB, "sizeMinus1");
-        sizeVal = IRB->CreateAdd(sizeVal, IRB->getInt64(1),
-                                 "size_of_" + std::to_string(I + 1));
-        SizeList.push_back(sizeVal);
-      }
-    }
-
-    // Get the actual offset for every dimension.
-    for (unsigned I = 1; I < SizeList.size(); ++I) {
-      SizeList[I] = IRB->CreateMul(SizeList[I - 1], SizeList[I],
-                                   "size" + std::to_string(I + 1));
-    }
-
-    for (unsigned I = numDims - 1; I >= 0; --I) {
-      auto sub = llSubs[I];
-      auto LB = LBs[I];
-      if (I == 0) {
-        if (offsetVal) {
-          offsetVal = IRB->CreateSub(offsetVal, LB, "negatelast");
-          offsetVal = IRB->CreateAdd(offsetVal, sub, "addsub");
-        } else {
-          offsetVal = IRB->CreateSub(sub, LB);
-        }
-        break;
-      }
-
-      llvm::Value *currExprVal = nullptr;
-      // Multiply the expression with other upper dimension.
-      auto currDim = IRB->CreateMul(sub, SizeList[I - 1]);
-      auto minusLB = IRB->CreateMul(LB, SizeList[I - 1], "negate");
-      currExprVal = IRB->CreateSub(currDim, minusLB);
-      if (I == numDims - 1)
-        offsetVal = currExprVal;
-      else
-        offsetVal = IRB->CreateAdd(offsetVal, currExprVal);
-    }
+  auto one = builder.create<mlir::ConstantIntOp>(mlirloc, 1, 32);
+  for (auto sub : arrEle->getSubscriptList()) {
+    auto tempSub = emitExpression(sub);
+    if (isString && !isPartial)
+      tempSub = builder.create<mlir::SubIOp>(
+          mlirloc, tempSub, emitCastExpr(one, tempSub.getType()));
+    subs.push_back(FC::SubscriptRange(castToIndex(tempSub)));
   }
 
-  CurrBase = IRB->CreateBitCast(CurrBase, LLBaseTy->getPointerTo());
-  CurrBase = IRB->CreateInBoundsGEP(
-      CurrBase, offsetVal, arrEle->getName() + (isLHS ? ".write" : ".read"));
-  if (isLHS)
-    return CurrBase;
+  one = builder.create<mlir::ConstantIntOp>(mlirloc, 0, 32);
+  for (unsigned i = subs.size(); i < fcArrayTy->getNumDims(); ++i) {
+    // TODO Push lbound
+    subs.push_back(FC::SubscriptRange(castToIndex(one)));
+    isPartial = true;
+  }
 
-  return emitLoadInstruction(CurrBase, arrEle->getName() + ".read");
+  if (fcArrayTy->isStringArrTy() && isPartial) {
+    std::reverse(subs.begin(), subs.end());
+  }
+
+  auto loadOp = builder.create<FC::FCLoadOp>(mlirloc, Alloca, subs);
+  loadOp.setAttr("name", builder.getStringAttr(arrEle->getSymbol()->getName()));
+  return loadOp;
 }
 
-Value *CodeGen::emitArrayElement(ArrayElement *arrEle, bool isLHS,
-                                 llvm::Value *addr) {
-  auto fcTy = arrEle->getSymbol()->getOrigType();
-
-  fc::ArrayType *fcArrayTy;
-  if (auto fcPointerTy = llvm::dyn_cast<fc::PointerType>(fcTy)) {
-    fcArrayTy = llvm::dyn_cast<fc::ArrayType>(fcPointerTy->getElementType());
-  } else {
-    fcArrayTy = llvm::dyn_cast<fc::ArrayType>(fcTy);
-  }
-
-  assert(fcArrayTy);
-  auto boundsList = fcArrayTy->getBoundsList();
-
-  if (!boundsList.empty()) {
-    return emitStaticArrayElement(arrEle, isLHS, addr);
-  }
-  if (std == Standard::f77) {
-    return emitf77DynArrayElement(arrEle, isLHS, addr);
-  }
-
-  if ((fcArrayTy->getElementTy()->isCharacterTy() ||
-       fcArrayTy->getElementTy()->isStringCharTy()) &&
-      arrEle->getNumIndices() < fcArrayTy->getNumDims()) {
-    isLHS = true;
-  }
-
-  // pointer to arrays are dynamic, they are handled inside
-  // emitDynArrayElement()
-  return emitDynArrayElement(arrEle, isLHS, addr);
-}
-
-llvm::Value *CodeGen::emitStructureComponent(fc::StructureComponent *structComp,
-                                             bool isLHS) {
-  Symbol *outerStructSym = nullptr;
-  ObjectName *outerStructObj = nullptr;
-  ArrayElement *outerStructArr = nullptr;
-
-  Expr *firstPartRef = structComp->getPartRefAt(0);
-
-  if ((outerStructObj = llvm::dyn_cast<ObjectName>(firstPartRef))) {
-    outerStructSym = outerStructObj->getSymbol()->getOrigSymbol();
-  } else if ((outerStructArr = llvm::dyn_cast<ArrayElement>(firstPartRef))) {
-    outerStructSym = outerStructArr->getSymbol()->getOrigSymbol();
-  } else {
-    llvm_unreachable("unhandled first part-ref");
-  }
-
-  StructType *outerStructType = llvm::dyn_cast<StructType>(
-      Type::getCoreElementType(outerStructSym->getType()));
-
-  assert(outerStructType);
-
-  llvm::Value *llValue = nullptr;
-  if (outerStructObj)
-    llValue = context.getLLVMValueFor(outerStructSym->getName());
-  else if (outerStructArr)
-    llValue = emitArrayElement(outerStructArr, /*isLHS*/ true);
-
-  assert(llValue && llValue->getType()->isPointerTy());
-
-  // If the outer-most part-ref is a pointer-type, then dereference it,
-  if (llValue->getType()->getPointerElementType()->isPointerTy()) {
-    llValue =
-        emitLoadInstruction(llValue, llValue->getName().str() + ".loadptr",
-                            /* disableTBAA = */ true);
-  }
-
-  assert(llValue->getType()->isPointerTy() &&
-         llValue->getType()->getPointerElementType()->isStructTy());
-
-  unsigned numPartRefs = structComp->getOperands().size();
-  unsigned offset = 0;
-  std::string refName = outerStructSym->getName();
-
-  for (unsigned i = 1; i < numPartRefs; ++i) {
-    std::string fieldName;
-    Expr *partRef = structComp->getPartRefAt(i);
-
-    if (auto field = llvm::dyn_cast<ObjectName>(partRef)) {
-      fieldName = field->getName();
-    } else if (auto field = llvm::dyn_cast<ArrayElement>(partRef)) {
-      fieldName = field->getName();
-    } else {
-      llvm_unreachable("unhandled part-ref");
-    }
-
-    offset = outerStructType->getIndexOf(fieldName);
-    refName.append("." + fieldName);
-
-    // Last part-ref won't be "gep'ed into".
-    if (i != (numPartRefs - 1)) {
-      Type *partRefType = outerStructType->getContainedType(offset);
-
-      ArrayElement *partRefArrayElem = nullptr;
-      PointerType *partRefPtrType = nullptr;
-
-      if ((partRefArrayElem = llvm::dyn_cast<ArrayElement>(partRef))) {
-
-        outerStructType =
-            llvm::dyn_cast<StructType>(partRefArrayElem->getElementType());
-
-        // It might be a PonterType to StructType
-        if (!outerStructType) {
-          PointerType *ptrType =
-              llvm::dyn_cast<PointerType>(partRefArrayElem->getElementType());
-          assert(ptrType);
-          outerStructType =
-              llvm::dyn_cast<StructType>(ptrType->getElementType());
-        }
-        assert(outerStructType);
-
-        llValue = IRB->CreateStructGEP(nullptr, llValue, offset, refName);
-        // Note that emitArrayElement handles the case if this part-ref is
-        // an array-elem from a pointer. Also, we are "GEPing" the array-addr
-        // here, so we treat is like an lvalue.
-        llValue = emitArrayElement(partRefArrayElem, /*isLHS*/ true, llValue);
-
-        // If not ArrayElement, then the part-ref could only be an ObjectName
-        // here.
-        // If this is a pointer to a structure, then deref it
-      } else if ((partRefPtrType = llvm::dyn_cast<PointerType>(partRefType))) {
-        outerStructType =
-            llvm::dyn_cast<StructType>(partRefPtrType->getElementType());
-
-        // Pointer as array-elem should be handled in the above if
-        assert(outerStructType);
-
-        llValue = IRB->CreateStructGEP(nullptr, llValue, offset, refName);
-        llValue = emitLoadInstruction(llValue, refName + ".loadptr",
-                                      /* disableTBAA = */ true);
-
-      } else {
-        outerStructType = llvm::dyn_cast<StructType>(partRefType);
-        assert(outerStructType);
-        llValue = IRB->CreateStructGEP(nullptr, llValue, offset, refName);
-      }
-    }
-  }
-
-  Expr *lastPartRef = structComp->getPartRefAt(numPartRefs - 1);
-  Value *lastGEP = IRB->CreateStructGEP(nullptr, llValue, offset, refName);
-
-  // ArrayElement as last part-ref handling:
-  if (auto fcArr = llvm::dyn_cast<ArrayElement>(lastPartRef)) {
-    freezeTBAA = true;
-    llvm::Value *arrEle = emitArrayElement(fcArr, isLHS, lastGEP);
-    freezeTBAA = false;
-    return arrEle;
-  }
-
-  // ObjectName as last part-ref handling:
-  if (isLHS) {
-    return lastGEP;
-  }
-
-  auto load = emitStructLoadInst(lastGEP, llValue, llValue->getType(), offset,
-                                 refName + ".load");
-  return load;
-}
-
-Value *CodeGen::emitExpression(Expr *expr, bool isLHS) {
+mlir::Value CodeGen::emitExpression(Expr *expr, bool isLHS) {
   auto kind = expr->getStmtType();
+  auto mlirloc = getLoc(expr->getSourceLoc());
   switch (kind) {
   case StmtType::ConstantValKind: {
     auto Const = static_cast<ConstantVal *>(expr);
     auto type = Const->getType();
-    if (type->isArrayTy()) {
-      llvm::SmallVector<llvm::StringRef, 2> constList;
-      for (auto &val : Const->getConstant()->getArrValue()) {
-        constList.push_back(val);
-      }
-      return emitConstant(constList, Const->getType());
+    if (type->isIntegralTy()) {
+      auto constant = builder.create<mlir::ConstantIntOp>(
+          mlirloc, Const->getInt(), type->getSizeInBits());
+      return constant.getResult();
     }
-    return emitConstant(Const->getValueRef(), Const->getType());
+
+    if (type->isRealTy() || type->isDoubleTy()) {
+      auto str = Const->getValue();
+      bool isDouble = type->isDoubleTy();
+      for (unsigned k = 0; k < str.size(); ++k) {
+        if (str[k] == 'd' || str[k] == 'D') {
+          isDouble = true;
+          str[k] = 'E';
+        }
+      }
+      auto floatTy = isDouble ? mlir::FloatType::getF64(&mlirContext)
+                              : mlir::FloatType::getF32(&mlirContext);
+
+      if (isDouble) {
+        auto floatVal = llvm::APFloat(::atof(str.c_str()));
+        auto constant =
+            builder.create<mlir::ConstantFloatOp>(mlirloc, floatVal, floatTy);
+        return constant.getResult();
+      }
+
+      auto floatVal = llvm::APFloat((float)Const->getFloat());
+      auto constant =
+          builder.create<mlir::ConstantFloatOp>(mlirloc, floatVal, floatTy);
+      return constant.getResult();
+    }
+    /*
+    if (type->isRealTy()) {
+      auto floatVal = llvm::APFloat((float)Const->getFloat());
+      auto constant = builder.create<mlir::ConstantFloatOp>(
+          mlirloc, floatVal, mlir::FloatType::getF32(&mlirContext));
+      return constant.getResult();
+    }
+    if (type->isDoubleTy()) {
+      auto floatVal = llvm::APFloat(Const->getFloat());
+      auto constant = builder.create<mlir::ConstantFloatOp>(
+          mlirloc, floatVal, mlir::FloatType::getF64(&mlirContext));
+      return constant.getResult();
+    }
+    */
+
+    auto ArrTy = llvm::dyn_cast<ArrayType>(type);
+    if ((ArrTy && ArrTy->getElementTy()->isStringCharTy()) ||
+        type->isCharacterTy()) {
+
+      auto string = Const->getValueRef().str();
+      string += '\0';
+      long stringSize = (long)string.size();
+
+      FC::ArrayType::Shape shape;
+      shape.push_back({0, stringSize - 1, stringSize});
+      auto stringType = FC::ArrayType::get(shape, builder.getIntegerType(8));
+      auto stringVal = builder.create<FC::StringOp>(
+          mlirloc, stringType, builder.getStringAttr(string));
+      return stringVal.getResult();
+    }
+
+    if (type->isLogicalTy()) {
+      int val = Const->getValueRef().equals_lower(".false.") ? 0 : 1;
+      auto constant = builder.create<mlir::ConstantIntOp>(mlirloc, val, 1);
+      return constant.getResult();
+    }
+
+    llvm_unreachable("unknown constant type");
   }
 
   case StmtType::ObjectNameKind: {
     auto objName = static_cast<ObjectName *>(expr);
-    auto Alloca = context.getLLVMValueFor(objName->getName());
+    auto Alloca = context.getMLIRValueFor(objName->getName());
+
     assert(Alloca);
-
-    if (isLHS && objName->getSymbol()->getOrigType()->isPointerTy()) {
-      return emitLoadInstruction(Alloca, Alloca->getName().str() + ".loadptr",
-                                 /* disableTBAA = */ true);
-    }
-
-    if (objName->getSymbol()->getOrigType()->isPointerTy()) {
-      auto ptrLoad =
-          emitLoadInstruction(Alloca, Alloca->getName().str() + ".loadptr",
-                              /* disableTBAA = */ true);
-      return emitLoadInstruction(ptrLoad, Alloca->getName().str() + ".load",
-                                 /* disableTBAA = */ true);
-    }
-
     if (isLHS || objName->getType()->isArrayTy() ||
-        objName->getType()->isStringCharTy())
+        (Alloca.isa<mlir::BlockArgument>() &&
+         Alloca.getType().isa<mlir::IndexType>()))
       return Alloca;
-    return emitLoadInstruction(Alloca, Alloca->getName().str() + ".load");
-  }
-
-  case StmtType::StructureComponentKind: {
-    auto structComp = static_cast<StructureComponent *>(expr);
-    return emitStructureComponent(structComp, isLHS);
+    return emitLoadInstruction(Alloca, objName->getName());
   }
 
   // Handle array access!
   case StmtType::ArrayElementKind: {
-    auto arrEle = cast<ArrayElement>(expr);
-    return emitArrayElement(arrEle, isLHS);
+    auto arrEle = llvm::cast<fc::ArrayElement>(expr);
+    if (!isLHS)
+      return emitArrayElement(arrEle, isLHS);
+    else
+      return emitFCArrayElement(arrEle);
   }
 
   case StmtType::BinaryExprKind: {
@@ -1053,20 +860,28 @@ Value *CodeGen::emitExpression(Expr *expr, bool isLHS) {
     auto lhs = binaryExpr->getLHS();
     auto rhs = binaryExpr->getRHS();
     auto OpKind = binaryExpr->getOpKind();
-
     if (!lhs) { // unary minus (note that unary plus is merely ignored in the
       // parser)
       assert(false);
       auto rhsVal = emitExpression(rhs);
       assert(rhsVal);
       assert(OpKind == BinaryOpKind::Subtraction);
-      return IRB->CreateBinOp(Instruction::Sub, IRB->getInt32(0), rhsVal);
+      return builder
+          .create<mlir::SubIOp>(
+              mlirloc, builder.create<mlir::ConstantIntOp>(mlirloc, 0, 32),
+              rhsVal)
+          .getResult();
     }
 
     auto lhsVal = emitExpression(lhs);
     auto rhsVal = emitExpression(rhs);
     assert(lhsVal && rhsVal);
-    return getLLVMBinaryOp(lhsVal, rhsVal, OpKind);
+
+    // Concat operates on char arrays, but isn't translated to an MLIR array op.
+    if (lhsVal.getType().isa<FC::ArrayType>() && OpKind != BinaryOpKind::Concat)
+      return getMLIRArrayBinaryOp(lhsVal, rhsVal, OpKind);
+
+    return getMLIRBinaryOp(lhsVal, rhsVal, OpKind);
   }
   case StmtType::RelationalExprKind: {
     auto relExpr = static_cast<RelationalExpr *>(expr);
@@ -1078,25 +893,9 @@ Value *CodeGen::emitExpression(Expr *expr, bool isLHS) {
     auto rhsVal = emitExpression(rhs);
     assert(lhsVal && rhsVal);
 
-    // String comparision
-    if (auto arrSec = llvm::dyn_cast<fc::ArraySection>(lhs)) {
-      auto arrayTy = llvm::dyn_cast<fc::ArrayType>(arrSec->getType());
-      assert(arrayTy);
-      assert(arrayTy->getElementTy()->isCharacterTy() ||
-             arrayTy->getElementTy()->isStringCharTy());
-      return emitStrCmp(lhsVal, rhsVal, OpKind);
-    }
-    // For character comparison where RHS is a constant which can be string or
-    // char
-    // TODO : A sema pass to infer constants as string or character will help
-    if (llvm::isa<ArrayElement>(lhs) && llvm::isa<ConstantVal>(rhs) &&
-        rhs->getType()->isCharacterTy()) {
-      rhsVal =
-          IRB->CreateInBoundsGEP(rhsVal, {IRB->getInt32(0), IRB->getInt32(0)});
-      rhsVal = emitLoadInstruction(rhsVal, "str.load");
-    }
-
-    return getLLVMRelationalOp(lhsVal, rhsVal, OpKind);
+    if (lhsVal.getType().isa<FC::ArrayType>())
+      return getMLIRArrayRelationalOp(lhsVal, rhsVal, OpKind);
+    return getMLIRRelationalOp(lhsVal, rhsVal, OpKind);
   }
   case StmtType::LogicalExprKind: {
     auto logicalExpr = static_cast<LogicalExpr *>(expr);
@@ -1107,65 +906,20 @@ Value *CodeGen::emitExpression(Expr *expr, bool isLHS) {
     if (!lhs) { // no lhs for .NOT.
       auto rhsVal = emitExpression(rhs);
       assert(rhsVal);
-      return getLLVMLogicalOp(nullptr, rhsVal, OpKind);
+      return getMLIRLogicalOp(nullptr, rhsVal, OpKind);
     }
     auto lhsVal = emitExpression(lhs);
     auto rhsVal = emitExpression(rhs);
     assert(lhsVal && rhsVal);
-    return getLLVMLogicalOp(lhsVal, rhsVal, OpKind);
+    return getMLIRLogicalOp(lhsVal, rhsVal, OpKind);
   }
   case StmtType::CastExprKind: {
     auto castExpr = static_cast<CastExpr *>(expr);
     auto fromExpr = castExpr->getExpr();
     auto fromVal = emitExpression(fromExpr);
-    auto toType = cgHelper->getLLVMTypeFor(castExpr->getType());
-    auto fromType = fromVal->getType();
-
-    if (fromType == toType)
-      return fromVal;
-
-    switch (fromVal->getType()->getTypeID()) {
-    case llvm::Type::IntegerTyID: {
-      if (toType->isFloatingPointTy()) {
-        return IRB->CreateSIToFP(fromVal, toType, "cast");
-      }
-
-      if (fromType->isIntegerTy(32) && toType->isIntegerTy(64)) {
-        return IRB->CreateSExt(fromVal, toType, "case");
-      }
-
-      if (fromType == toType)
-        return fromVal;
-
-      llvm_unreachable("unknown integer cast type in llvm");
-    }
-    case llvm::Type::FloatTyID: {
-      if (toType->isIntegerTy()) {
-        return IRB->CreateFPToSI(fromVal, toType, "cast");
-      }
-      if (toType->isDoubleTy()) {
-        return IRB->CreateFPExt(fromVal, toType, "fpext");
-      }
-      llvm_unreachable("unknown float cast type in llvm");
-    }
-    case llvm::Type::DoubleTyID: {
-      if (toType->isIntegerTy()) {
-        return IRB->CreateFPToSI(fromVal, toType, "cast");
-      }
-      if (toType->isFloatTy()) {
-        return IRB->CreateFPTrunc(fromVal, toType, "fptrunc");
-      }
-      if (toType->isDoubleTy()) {
-        return fromVal;
-      }
-      llvm_unreachable("unknown double cast type in llvm");
-    }
-    default:
-      llvm_unreachable("unknown cast type in llvm");
-      break;
-    }
-    break;
+    return emitCastExpr(fromVal, cgHelper->getMLIRTypeFor(castExpr->getType()));
   }
+
   case StmtType::FunctionReferenceKind: {
 
     auto funcReference = static_cast<FunctionReference *>(expr);
@@ -1175,29 +929,17 @@ Value *CodeGen::emitExpression(Expr *expr, bool isLHS) {
     auto sym = funcReference->getSymbol()->getOrigSymbol();
     auto argList = funcReference->getArgsList();
     auto Call = emitCall(sym, argList);
-    if (intrin::isIntrinsic(sym->getName()))
-      return Call;
-
-    // auto funcRefName = cgHelper->getEmittedNameForPU(sym->getName());
-    // auto GV = cgHelper->getReturnValueFor(funcRefName);
-    return Call;
+    return Call->getResult(0);
   }
 
   case StmtType::ArraySectionKind: {
     auto arrSec = static_cast<ArraySection *>(expr);
     assert(arrSec->isFullRange());
-    auto sym = arrSec->getSymbol()->getOrigSymbol();
-    auto Alloca = context.getLLVMValueFor(sym->getName());
-
-    if (sym->getType()->isPointerTy()) {
-      return emitLoadInstruction(Alloca, Alloca->getName().str() + ".loadptr",
-                                 /* disableTBAA = */ true);
-    }
-
-    if (isLHS || sym->getType()->isArrayTy() ||
-        sym->getType()->isStringCharTy())
+    auto Alloca = context.getMLIRValueFor(arrSec->getName());
+    assert(Alloca);
+    if (isLHS)
       return Alloca;
-    return emitLoadInstruction(Alloca, Alloca->getName().str() + ".load");
+    return emitLoadInstruction(Alloca, arrSec->getName());
   }
   default:
     llvm_unreachable("Unkown base expression type.");
@@ -1205,8 +947,8 @@ Value *CodeGen::emitExpression(Expr *expr, bool isLHS) {
   return nullptr;
 }
 
-llvm::Value *CodeGen::getArrDimSizeVal(Expr *expr, llvm::Value *exprVal) {
-  auto arrEle = dyn_cast<ArraySection>(expr);
+mlir::Value CodeGen::getArrDimSizeVal(Expr *expr, mlir::Value exprVal) {
+  auto arrEle = llvm::dyn_cast<ArraySection>(expr);
   if (!arrEle)
     return nullptr;
 
@@ -1224,39 +966,17 @@ llvm::Value *CodeGen::getArrDimSizeVal(Expr *expr, llvm::Value *exprVal) {
   if (!arrType->boundsEmpty()) {
     auto boundsList = arrType->getBoundsList();
 
-    llvm::Value *sizeVal = nullptr;
+    mlir::Value sizeVal = nullptr;
     for (unsigned i = 0; i < boundsList.size(); ++i) {
       auto currSizeVal = emitSizeForArrBounds(boundsList[i]);
       if (!sizeVal) {
         sizeVal = currSizeVal;
         continue;
       }
-      sizeVal = IRB->CreateMul(sizeVal, currSizeVal);
+      sizeVal = builder.create<mlir::MulIOp>(getLoc(expr->getSourceLoc()),
+                                             sizeVal, currSizeVal);
     }
     return sizeVal;
   }
-
-  // If the array type is dynamic, get the value and compute the bounds.
-  // Now store the dims.
-  assert(exprVal->getType()->isPointerTy() &&
-         exprVal->getType()->getPointerElementType()->isStructTy());
-  auto name = exprVal->getName();
-  auto dimsArr = IRB->CreateStructGEP(nullptr, exprVal, 1, name + ".dimsArr");
-  llvm::Value *sizeVal = nullptr;
-  for (int I = 0; I < arrType->getNumDims(); ++I) {
-    auto Dim = IRB->CreateInBoundsGEP(
-        dimsArr, {IRB->getInt32(0), IRB->getInt32(I)}, name + ".dim");
-
-    auto Size = IRB->CreateStructGEP(nullptr, Dim, 2, name + ".size");
-    // auto Load = emitLoadInstruction(Size, name + ".load");
-    auto Load =
-        emitStructLoadInst(Size, Dim, Dim->getType(), 2, name + ".size");
-
-    if (I == 0) {
-      sizeVal = Load;
-      continue;
-    }
-    sizeVal = IRB->CreateMul(sizeVal, Load);
-  }
-  return sizeVal;
+  llvm_unreachable("Dynamic array size");
 }

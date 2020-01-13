@@ -99,6 +99,9 @@ ASTPass *createArraySectionReplacerPass(ASTContext &C);
 
 // Pass to bind symbols in part-refs to correct symtab (after use-stmt handler)
 ASTPass *createPartRefSymResolverPass(ASTContext &C);
+
+// Pass to infer openmp symbools
+ASTPass *createOpenMPSymbolInferPass(ASTContext &C);
 } // namespace fc
 
 #endif

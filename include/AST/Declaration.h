@@ -237,7 +237,7 @@ public:
 
   DerivedTypeDefList getDTDs() { return dtds; }
 
-  std::string dump(llvm::raw_ostream &OS, int level = 0) const override;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   constexpr static bool classof(const Stmt *stmt) {
     return (stmt->getStmtType() == UseStmtKind);

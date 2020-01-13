@@ -70,9 +70,11 @@ class ArraySectionHelper {
   ASTContext &C;
 
 public:
-  ArraySectionHelper(ParseTreeBuilder _builder, SymbolTable *_symTable,
+  ArraySectionHelper(ParseTreeBuilder &_builder, SymbolTable *_symTable,
                      ASTContext &_C)
       : builder(_builder), currSymTable(_symTable), C(_C) {}
+
+  ParseTreeBuilder &getBuilder() { return builder; }
 
   ArrayElement *getArrayElementFor(ArraySection *arrSec, RangeInfoList &list);
 
@@ -98,6 +100,8 @@ public:
 
   Symbol *getTempArray(ArraySpec *spec, unsigned numDims, Type *elementTy,
                        StmtVecList &newStmtList);
+
+  ObjectName *getTempObjName(Type *eleTy, SourceLoc loc);
 };
 
 } // namespace ast

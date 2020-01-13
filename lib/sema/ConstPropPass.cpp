@@ -230,6 +230,8 @@ public:
       break;
     case BinaryOpKind::Concat:
       result += rhsVal;
+    default:
+      llvm_unreachable("binary operator kind not handled.");
     }
     return result;
   }

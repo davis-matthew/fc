@@ -258,6 +258,7 @@ Parser::parseEntityDecl(DeclarationTypeSpec *declTypeSpec, ArraySpec *arraySpec,
     // from DerivedTypeSpec. All DTFs are stored in the specification part that
     // can be indexed by their name, but we are in the process of creating that
     // specification part!!!
+    assert(dts);
     type = Type::getUndeclaredTy(FC);
   }
 
@@ -341,7 +342,8 @@ Parser::parseEntityDecl(DeclarationTypeSpec *declTypeSpec, ArraySpec *arraySpec,
   }
 
   auto currScope = context.currSymTable->getScopeKind();
-  if (currScope == ModuleScope || context.isCurrUnitNested() || hasSave) {
+  if (currScope == ModuleScope || (context.isCurrUnitNested() && init) ||
+      hasSave) {
     attributes.allocKind = AllocationKind::StaticGlobal;
     if (context.isCurrUnitNested()) {
       attributes.linkKind = LinkageKind::Link_Internal;

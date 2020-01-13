@@ -156,6 +156,15 @@ public:
 
   ArgsList getArgsList() { return argsList; }
 
+  int getArgNumForSymbol(llvm::StringRef name) {
+    for (auto arg : llvm::enumerate(argsList)) {
+      if (arg.value() == name) {
+        return arg.index();
+      }
+    }
+    return -1;
+  }
+
   Type *getReturnType() const;
 
   void setReturnType(Type *returnTy);

@@ -75,8 +75,18 @@ ArgsList Parser::parseArgsList(TokenKind endTok) {
   return exprList;
 }
 
+bool Parser::isOpenMPEndStmt() {
+  if (isNot(tok::dir))
+    return false;
+
+  if (match({tok::kw_omp, tok::kw_end}))
+    return true;
+
+  return false;
+}
+
 bool Parser::parseExecutableStmtList(StmtList &stmtList) {
-  while (!utils::isBlockEnd(currTokenKind)) {
+  while (!utils::isBlockEnd(currTokenKind) && !isOpenMPEndStmt()) {
     if (parseActionStmt(stmtList))
       continue;
     llvm_unreachable("Unhandled executable construct");

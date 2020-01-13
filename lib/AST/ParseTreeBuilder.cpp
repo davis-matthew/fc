@@ -29,6 +29,7 @@
 #include "AST/ProgramUnit.h"
 #include "AST/Statements.h"
 #include "AST/Stmt.h"
+#include "AST/StmtOpenMP.h"
 #include "AST/SymbolTable.h"
 #include "AST/Type.h"
 #include "common/Util.h"
@@ -611,4 +612,16 @@ llvm::SmallVector<DoStmt *, 2> ParseTreeBuilder::buildLoopNestFor(
 BinaryExpr *ParseTreeBuilder::buildAddExpr(Expr *op1, Expr *op2) {
   return buildExpr(op1, op2, BinaryOpKind::Addition, op2->getType(),
                    op2->getSourceLoc());
+}
+
+OpenMPParallelStmt *ParseTreeBuilder::buildOpenMPParallelStmt(Block *block,
+                                                              SourceLoc loc) {
+  return new (Context, alignof(OpenMPParallelStmt))
+      OpenMPParallelStmt(loc, block);
+}
+
+OpenMPParallelDoStmt *
+ParseTreeBuilder::buildOpenMPParallelDoStmt(DoStmt *dostmt, SourceLoc loc) {
+  return new (Context, alignof(OpenMPParallelDoStmt))
+      OpenMPParallelDoStmt(loc, dostmt);
 }

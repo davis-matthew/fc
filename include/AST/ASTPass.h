@@ -24,7 +24,9 @@
 #ifndef FC_AST_PASS
 #define FC_AST_PASS
 
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
+
 namespace fc {
 class ASTContext;
 class SymbolTable;

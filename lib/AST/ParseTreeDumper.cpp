@@ -29,6 +29,7 @@
 #include "AST/ProgramUnit.h"
 #include "AST/Statements.h"
 #include "AST/Stmt.h"
+#include "AST/StmtOpenMP.h"
 #include "AST/SymbolTable.h"
 #include "AST/Type.h"
 #include "common/Util.h"
@@ -283,6 +284,16 @@ static std::string getAllocKindStr(AllocationKind allocKind) {
 
 static std::string getString(Type *type) {
   return getString(type->getTypeID());
+}
+
+std::string Stmt::dump(llvm::raw_ostream &OS, int level) const {
+  switch (getStmtType()) {
+#define STMT(NODE)                                                             \
+  case NODE##Kind:                                                             \
+    return (static_cast<const NODE *>(this))->dump(OS, level);
+#include "AST/statements.def"
+  };
+  return "";
 }
 
 std::string ConstantVal::dump(llvm::raw_ostream &OS, int level) const {
@@ -1178,5 +1189,21 @@ std::string WhereConstruct::dump(llvm::raw_ostream &OS, int level) const {
       llvm_unreachable("Unhandled where stmt kind");
     }
   }
+  return "";
+}
+
+std::string OpenMPParallelStmt::dump(llvm::raw_ostream &OS, int level) const {
+  os << "// " << getLocString(this->getSourceLoc()) << "\n";
+  os << "omp parallel {\n";
+  getBlock()->dump(OS, level + 2);
+  os << "}\n";
+  return "";
+}
+
+std::string OpenMPParallelDoStmt::dump(llvm::raw_ostream &OS, int level) const {
+  os << "// " << getLocString(this->getSourceLoc()) << "\n";
+  os << "omp parallel do {\n";
+  getDoStmt()->dump(OS, level + 2);
+  os << "}\n";
   return "";
 }

@@ -153,7 +153,8 @@ public:
     info.bounds.first = quadExpr->getInit();
     info.bounds.second = quadExpr->getEnd();
     info.stride = quadExpr->getIncr();
-    info.indvar = llvm::dyn_cast<ObjectName>(quadExpr->getVar());
+    info.indvar = helper.getTempObjName(quadExpr->getVar()->getType(),
+                                        quadExpr->getSourceLoc());
     assert(info.indvar);
 
     ExprRangeInfo exprRangeInfo;
@@ -283,6 +284,11 @@ bool ArraySectionHelper::insertOtherRangeInfo(
     }
   }
   return true;
+}
+
+ObjectName *ArraySectionHelper::getTempObjName(Type *eleTy, SourceLoc loc) {
+  auto tempSym = currSymTable->getTempSymbol(eleTy, loc);
+  return builder.buildObjectName(tempSym, loc);
 }
 
 Symbol *ArraySectionHelper::getTempArray(ArraySpec *spec, unsigned numDims,

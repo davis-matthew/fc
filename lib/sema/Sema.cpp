@@ -32,6 +32,9 @@ using namespace ast;
 llvm::cl::opt<bool> RunConstProp("const-prop",
                                  llvm::cl::desc("Run constant propagation"),
                                  llvm::cl::init(true));
+llvm::cl::opt<bool> DisableArraySectionExpansion(
+    "disable-arr-sec-expansion",
+    llvm::cl::desc("Disable array section expander"), llvm::cl::init(false));
 
 bool Sema::run() {
 
@@ -75,11 +78,16 @@ bool Sema::run() {
   semaPM.addPass(createParamConstPropPass(semaPM.getContext()));
   semaPM.addPass(createFunctionTypeUpdaterPass(semaPM.getContext()));
   semaPM.addPass(createArraySectionReplacerPass(semaPM.getContext()));
-  semaPM.addPass(createArraySecExpanderPass(semaPM.getContext()));
+  if (!DisableArraySectionExpansion)
+    semaPM.addPass(createArraySecExpanderPass(semaPM.getContext()));
   semaPM.addPass(createDeclEliminatorPass(semaPM.getContext()));
   semaPM.addPass(createIntrinsicExpanderPass(semaPM.getContext()));
-  semaPM.addPass(createArraySecExpanderPass(semaPM.getContext()));
+  if (!DisableArraySectionExpansion)
+    semaPM.addPass(createArraySecExpanderPass(semaPM.getContext()));
   semaPM.addPass(createExprTypeUpdaterPass(semaPM.getContext()));
   semaPM.addPass(createArrBoundsIntrinExpanderPass(semaPM.getContext()));
+
+  // OpenMP related
+  semaPM.addPass(createOpenMPSymbolInferPass(semaPM.getContext()));
   return semaPM.run();
 }

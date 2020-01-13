@@ -28,6 +28,7 @@
 #include "AST/ProgramUnit.h"
 #include "AST/Statements.h"
 #include "AST/Stmt.h"
+#include "AST/StmtOpenMP.h"
 #include "AST/SymbolTable.h"
 #include "AST/Type.h"
 #include "common/Util.h"

@@ -68,7 +68,7 @@ public:
 
   constexpr StmtType getStmtType() const { return stmtType; }
 
-  virtual std::string dump(llvm::raw_ostream &OS, int level = 0) const = 0;
+  std::string dump(llvm::raw_ostream &OS, int level = 0) const;
 
   constexpr Stmt *getParent() const { return parentNode.parent; }
 

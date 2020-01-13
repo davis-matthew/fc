@@ -94,6 +94,7 @@ enum BinaryOpKind {
   Division,
   Power,
   Concat, // "operator //"
+  Mod,
 };
 
 enum RelationalOpKind {

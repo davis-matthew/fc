@@ -29,6 +29,7 @@
 
 #include "AST/ParserTreeCommon.h"
 #include "AST/Statements.h"
+#include "AST/StmtOpenMP.h"
 #include "ProgramUnit.h"
 
 namespace fc {
