@@ -1,2 +1,2 @@
-add_subdirectory(FCOps)
-add_subdirectory(OpenMPOps)
+add_subdirectory(FC)
+add_subdirectory(OpenMP)

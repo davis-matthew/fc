@@ -4,7 +4,8 @@
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are met:
 //
-// 1. Redistributions of source code must retain the above copyright notice, this
+// 1. Redistributions of source code must retain the above copyright notice,
+// this
 //    list of conditions and the following disclaimer.
 //
 // 2. Redistributions in binary form must reproduce the above copyright notice,
@@ -13,14 +14,15 @@
 //
 // THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
 // AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-// DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-// FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-// DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-// SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-// CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-// OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+// CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+// POSSIBILITY OF SUCH DAMAGE.
 #include "AST/Expressions.h"
 #include "AST/ProgramUnit.h"
 #include "parse/Parser.h"
@@ -381,11 +383,32 @@ ArrayConstructor *Parser::parseArrayConstructor() {
 // The internal expr-operand parser which treats each part-ref of a
 // structure-component as an expr-operand. Set \p DTSymTable if the parser is
 // pointing to a "non-first part-ref" of a structure-component.
-Expr *Parser::_parseExprOperand(SymbolTable *DTSymTable) {
+Expr *Parser::_parseExprOperand(TokenKind prevTokenKind,
+                                SymbolTable *DTSymTable) {
 
   // Parse constant.
   if (utils::isConstant(currTokenKind)) {
     auto constType = expectConstant(false);
+
+    // parse complex constant kind.
+    if (lookAhead(1).Kind == tok::comma && !context.parsingArraySpec &&
+        prevTokenKind == tok::l_paren) {
+      bool isComplex = true;
+      isComplex &= utils::isConstant(lookAhead(2).Kind);
+      isComplex &= lookAhead(3).Kind == tok::r_paren;
+
+      if (isComplex) {
+        auto real = getToken().getRef();
+        consumeToken();
+        consumeToken(tok::comma);
+        auto imaginary = getToken().getRef();
+        auto constant = Constant::Create({real.str(), imaginary.str()},
+                                         ComplexType::get(FC, 8));
+        consumeToken();
+        return builder.buildConstantVal(constant, getToken().loc);
+      }
+    }
+
     assert(constType);
     if (constType->isArrayTy()) {
       ArrayBounds bounds;
@@ -431,7 +454,8 @@ Expr *Parser::_parseExprOperand(SymbolTable *DTSymTable) {
     // If the type is array
     if (type->isArrayTy()) {
       auto arrTy = static_cast<ArrayType *>(type);
-      assert(!arrTy->getElementTy()->isDerivedTy());
+      assert(!arrTy->getElementTy()->isDerivedTy() ||
+             arrTy->getElementTy()->isComplexTy());
       auto base = builder.buildObjectName(sym, loc);
       return builder.buildArraySection(sym, base, loc);
     }
@@ -482,8 +506,8 @@ Expr *Parser::_parseExprOperand(SymbolTable *DTSymTable) {
   return arrEle;
 }
 
-Expr *Parser::parseExprOperand() {
-  Expr *expr = _parseExprOperand();
+Expr *Parser::parseExprOperand(TokenKind prevToken) {
+  Expr *expr = _parseExprOperand(prevToken);
 
   if (!is(tok::percent))
     return expr; // not a struct-comp
@@ -497,7 +521,7 @@ Expr *Parser::parseExprOperand() {
     consumeToken(); // tok::percent
 
     // The symbols for each part-ref will be resolved at semantics.
-    partRef = _parseExprOperand(context.anonSymTab);
+    partRef = _parseExprOperand(prevToken, context.anonSymTab);
   }
   partRefs.push_back(partRef);
 
@@ -558,7 +582,7 @@ Expr *Parser::parseExpr(bool consumeCurrent) {
     if (utils::isConstant(currTok) || currTok == tok::identifier ||
         currTok == tok::arr_start || isKeyWordIdentifer(getToken()) ||
         isKeyWordIntrinsic(getToken())) {
-      auto expr = parseExprOperand();
+      auto expr = parseExprOperand(prevToken);
       valueStack.push(expr);
       prevToken = currTok;
       continue;

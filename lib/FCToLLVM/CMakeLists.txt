@@ -3,13 +3,14 @@ add_library(FCToLLVM
     FCToLLVMLowering.cpp
     FCFuncOpLowering.cpp
     FCTypeConverter.cpp
+    ComplexOpLowering.cpp
 )
 
 target_link_libraries(FCToLLVM
  FCCommon
  MLIRAffineOps
  MLIRFCOps
- MLIRLLVMIR 
+ MLIRLLVMIR
  MLIRStandardOps
  MLIRAffineToStandard
  )

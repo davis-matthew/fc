@@ -4,7 +4,8 @@
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are met:
 //
-// 1. Redistributions of source code must retain the above copyright notice, this
+// 1. Redistributions of source code must retain the above copyright notice,
+// this
 //    list of conditions and the following disclaimer.
 //
 // 2. Redistributions in binary form must reproduce the above copyright notice,
@@ -13,14 +14,15 @@
 //
 // THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
 // AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-// DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-// FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-// DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-// SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-// CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-// OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+// CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+// POSSIBILITY OF SUCH DAMAGE.
 #include "FCToLLVM/FCRuntimeHelper.h"
 #include "common/Debug.h"
 
@@ -94,6 +96,15 @@ static IOTypeKind getPrintTypeKind(mlir::Type Ty) {
     if (Ty.isF64()) {
       return IOTypeKind::double_precision;
     }
+    if (Ty.isIndex()) {
+      return IOTypeKind::int32;
+    }
+    if (auto cTy = Ty.dyn_cast<mlir::ComplexType>()) {
+      if (cTy.getElementType().isF32())
+        return IOTypeKind::complex_float;
+      if (cTy.getElementType().isF64())
+        return IOTypeKind::complex_double;
+    }
   }
 
   assert(ty);
@@ -122,6 +133,16 @@ static IOTypeKind getPrintTypeKind(mlir::Type Ty) {
 
   if (ty.isPointerTy() && ty.getPointerElementTy().isIntegerTy(8)) {
     return IOTypeKind::string;
+  }
+
+  // This is the complex type! Array types are passed with array info.
+  if (ty.isArrayTy() &&
+      (ty.getArrayElementType().isFloatTy() ||
+       ty.getArrayElementType().isDoubleTy()) &&
+      ty.getArrayNumElements() == 2) {
+    auto eleTy = ty.getArrayElementType();
+    return eleTy.isFloatTy() ? IOTypeKind::complex_float
+                             : IOTypeKind::complex_double;
   }
 
   ty.dump();

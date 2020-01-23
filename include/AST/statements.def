@@ -39,6 +39,9 @@ STMT(PointerAssignmentStmt)
 STMT(NullifyStmt)
 STMT(OpenMPParallelStmt)
 STMT(OpenMPParallelDoStmt)
+STMT(OpenMPSingleStmt)
+STMT(OpenMPMasterStmt)
+STMT(OpenMPDoStmt)
 
 // Block node which contains multiple statements.
 BLOCK(Block)

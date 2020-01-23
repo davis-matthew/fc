@@ -4,7 +4,8 @@
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are met:
 //
-// 1. Redistributions of source code must retain the above copyright notice, this
+// 1. Redistributions of source code must retain the above copyright notice,
+// this
 //    list of conditions and the following disclaimer.
 //
 // 2. Redistributions in binary form must reproduce the above copyright notice,
@@ -13,14 +14,15 @@
 //
 // THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
 // AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-// DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-// FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-// DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-// SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-// CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-// OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+// CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+// POSSIBILITY OF SUCH DAMAGE.
 //===- FCToLLVMLowering.cpp - Loop.for to affine.for conversion -----------===//
 //
 //===----------------------------------------------------------------------===//
@@ -34,8 +36,8 @@
 
 #include "FCToLLVM/FCToLLVMLowering.h"
 #include "FCToLLVM/FCRuntimeHelper.h"
-#include "dialect/FCOps/FCOps.h"
-#include "dialect/OpenMPOps/OpenMPOps.h"
+#include "dialect/FC/FCOps.h"
+#include "dialect/OpenMP/OpenMPOps.h"
 
 #include "mlir/Conversion/AffineToStandard/AffineToStandard.h"
 #include "mlir/Conversion/LoopToStandard/ConvertLoopToStandard.h"
@@ -564,6 +566,22 @@ public:
                   ConversionPatternRewriter &rewriter) const override {
     rewriter.replaceOpWithNewOp<LLVM::UndefOp>(
         op, converter->convertType(op->getResult(0).getType()));
+    return matchSuccess();
+  }
+};
+
+struct GetPointerToOpLowering : public ConversionPattern {
+  MLIRContext *context;
+
+public:
+  explicit GetPointerToOpLowering(MLIRContext *_context)
+      : ConversionPattern(FC::GetPointerToOp::getOperationName(), 1, _context),
+        context(_context) {}
+
+  PatternMatchResult
+  matchAndRewrite(Operation *op, ArrayRef<mlir::Value> operands,
+                  ConversionPatternRewriter &rewriter) const override {
+    rewriter.replaceOp(op, operands[0]);
     return matchSuccess();
   }
 };
@@ -1809,7 +1827,14 @@ public:
                   ConversionPatternRewriter &rewriter) const override {
     auto loadOp = cast<FCLoadOp>(op);
     OperandAdaptor<FC::FCLoadOp> transformed(operands);
-    auto type = loadOp.getPointer().getType().cast<FC::RefType>();
+
+    auto eleTy = loadOp.getPointer().getType();
+    if (auto refType = eleTy.dyn_cast<FC::RefType>()) {
+      eleTy = refType.getEleTy();
+    } else if (auto ptrType = eleTy.dyn_cast<FC::PointerType>()) {
+      eleTy = ptrType.getEleTy();
+    }
+
     mlir::Value dataPtr = nullptr;
 
     // Handle array loads.
@@ -1819,13 +1844,14 @@ public:
       return matchSuccess();
     }
 
-    if (!type.getEleTy().isa<FC::ArrayType>()) {
+    if (!eleTy.isa<FC::ArrayType>()) {
       // Scalar type.
       dataPtr = operands[0];
     } else {
-      dataPtr = getDataPtr(op->getLoc(), type, transformed.pointer(),
-                           transformed.indices(), rewriter,
-                           llvmDialect->getLLVMModule());
+      dataPtr = getDataPtr(op->getLoc(),
+                           loadOp.pointer().getType().cast<FC::RefType>(),
+                           transformed.pointer(), transformed.indices(),
+                           rewriter, llvmDialect->getLLVMModule());
     }
     rewriter.replaceOpWithNewOp<LLVM::LoadOp>(op, dataPtr);
     return matchSuccess();
@@ -2173,6 +2199,52 @@ public:
   }
 };
 
+struct FCNullPointerOpLowering : public ConversionPattern {
+  MLIRContext *context;
+  FCTypeConverter *converter;
+
+public:
+  explicit FCNullPointerOpLowering(MLIRContext *_context,
+                                   FCTypeConverter *converter)
+      : ConversionPattern(NullPointerOp::getOperationName(), 1, _context),
+        context(_context), converter(converter) {}
+
+  PatternMatchResult
+  matchAndRewrite(Operation *op, ArrayRef<mlir::Value> operands,
+                  ConversionPatternRewriter &rewriter) const override {
+
+    rewriter.replaceOpWithNewOp<LLVM::NullOp>(
+        op, converter->convertType(op->getResult(0).getType()));
+    return matchSuccess();
+  }
+};
+
+struct CmpPointerEqualOpLowering : public ConversionPattern {
+  MLIRContext *context;
+  FCTypeConverter *converter;
+
+public:
+  explicit CmpPointerEqualOpLowering(MLIRContext *_context,
+                                     FCTypeConverter *converter)
+      : ConversionPattern(CmpPointerEqualOp::getOperationName(), 1, _context),
+        context(_context), converter(converter) {}
+
+  PatternMatchResult
+  matchAndRewrite(Operation *op, ArrayRef<mlir::Value> operands,
+                  ConversionPatternRewriter &rewriter) const override {
+    OperandAdaptor<FC::CmpPointerEqualOp> transformed(operands);
+    auto lhs = transformed.lhs();
+    auto rhs = transformed.rhs();
+    auto llvmDialect(context->getRegisteredDialect<LLVM::LLVMDialect>());
+    auto I64 = LLVM::LLVMType::getInt64Ty(llvmDialect);
+    auto lhsToInt = rewriter.create<LLVM::PtrToIntOp>(op->getLoc(), I64, lhs);
+    auto rhsToInt = rewriter.create<LLVM::PtrToIntOp>(op->getLoc(), I64, rhs);
+    rewriter.replaceOpWithNewOp<LLVM::ICmpOp>(op, LLVM::ICmpPredicate::eq,
+                                              lhsToInt, rhsToInt);
+    return matchSuccess();
+  }
+};
+
 struct FCToLLVMLowering : public ModulePass<FCToLLVMLowering> {
   virtual void runOnModule() {
 
@@ -2238,11 +2310,19 @@ struct FCToLLVMLowering : public ModulePass<FCToLLVMLowering> {
     patterns.insert<FCArgcOpLowering>(&getContext(), module);
     patterns.insert<FCArgvOpLowering>(&getContext(), module);
 
+    // Pointer related operations.
+    patterns.insert<GetPointerToOpLowering>(&getContext());
+    patterns.insert<CmpPointerEqualOpLowering>(&getContext(), &typeConverter);
+    patterns.insert<FCNullPointerOpLowering>(&getContext(), &typeConverter);
+
     // undef operation
     patterns.insert<FCUndefLowering>(&getContext(), &typeConverter);
 
     // Convert FC function related patterns.
     populateFCFuncOpLoweringPatterns(patterns, &typeConverter, &getContext());
+
+    // Convert complex type related patterns
+    populateComplexOpLoweringPatterns(patterns, &typeConverter, &getContext());
 
     if (failed(applyFullConversion(module, target, patterns, &typeConverter)))
       signalPassFailure();

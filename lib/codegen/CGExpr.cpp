@@ -4,7 +4,8 @@
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are met:
 //
-// 1. Redistributions of source code must retain the above copyright notice, this
+// 1. Redistributions of source code must retain the above copyright notice,
+// this
 //    list of conditions and the following disclaimer.
 //
 // 2. Redistributions in binary form must reproduce the above copyright notice,
@@ -13,21 +14,22 @@
 //
 // THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
 // AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-// DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-// FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-// DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-// SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-// CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-// OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+// CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+// POSSIBILITY OF SUCH DAMAGE.
 #include "AST/ProgramUnit.h"
 #include "AST/SymbolTable.h"
 #include "AST/Type.h"
 #include "codegen/CGASTHelper.h"
 #include "codegen/CodeGen.h"
 #include "common/Debug.h"
-#include "dialect/FCOps/FCOps.h"
+#include "dialect/FC/FCOps.h"
 #include "sema/Intrinsics.h"
 
 #include "mlir/Analysis/Verifier.h"
@@ -351,6 +353,34 @@ mlir::Value CodeGen::getMLIRArrayBinaryOp(mlir::Value lhsVal,
   };
 }
 
+mlir::Value CodeGen::getMLIRComplexBinaryOp(mlir::Value lhsVal,
+                                            mlir::Value rhsVal,
+                                            fc::ast::BinaryOpKind opKind) {
+
+  assert(lhsVal && rhsVal);
+
+  auto lhsArrTy = lhsVal.getType().dyn_cast<mlir::ComplexType>();
+  auto rhsArrTy = rhsVal.getType().dyn_cast<mlir::ComplexType>();
+  auto loc = lhsVal.getLoc();
+  assert(lhsArrTy && rhsArrTy);
+
+  switch (opKind) {
+  case BinaryOpKind::Addition: {
+    return builder.create<FC::ComplexAddOp>(loc, lhsVal, rhsVal).getResult();
+  }
+  case BinaryOpKind::Subtraction: {
+    return builder.create<FC::ComplexSubOp>(loc, lhsVal, rhsVal).getResult();
+  }
+  case BinaryOpKind::Multiplication: {
+    return builder.create<FC::ComplexMulOp>(loc, lhsVal, rhsVal).getResult();
+  }
+  case BinaryOpKind::Division: {
+    return builder.create<FC::ComplexDivOp>(loc, lhsVal, rhsVal).getResult();
+  }
+  default: { llvm_unreachable("unhandled binary expresssion"); }
+  };
+}
+
 // FIXME: This is not elementwise compare. Currently works for
 // strcmp like usecases.
 mlir::Value CodeGen::getMLIRArrayRelationalOp(mlir::Value lhsVal,
@@ -641,7 +671,6 @@ mlir::Value CodeGen::expandIntrinsic(FunctionReference *funcReference) {
         arg.getLoc(), cosFn, llvm::ArrayRef<mlir::Type>{argType},
         llvm::ArrayRef<mlir::Value>{arg});
     return callOp.getResult(0);
-    break;
   }
   case fc::intrin::sin: {
     assert(argList.size() == 1);
@@ -653,7 +682,6 @@ mlir::Value CodeGen::expandIntrinsic(FunctionReference *funcReference) {
         arg.getLoc(), sinFn, llvm::ArrayRef<mlir::Type>{argType},
         llvm::ArrayRef<mlir::Value>{arg});
     return callOp.getResult(0);
-    break;
   }
   case fc::intrin::log: {
     assert(argList.size() == 1);
@@ -665,7 +693,36 @@ mlir::Value CodeGen::expandIntrinsic(FunctionReference *funcReference) {
         arg.getLoc(), logFn, llvm::ArrayRef<mlir::Type>{argType},
         llvm::ArrayRef<mlir::Value>{arg});
     return callOp.getResult(0);
-    break;
+  }
+  case fc::intrin::conjg: {
+    assert(argList.size() == 1);
+    auto arg = emitExpression(argList[0]);
+    auto argType = arg.getType();
+    auto conjgOp =
+        builder.create<FC::ComplexConjugateOp>(arg.getLoc(), argType, arg);
+    return conjgOp.getResult();
+  }
+  case fc::intrin::associated: {
+    assert(argList.size() <= 2);
+    auto pointerArg = emitExpression(argList[0], true);
+    pointerArg = builder.create<FC::FCLoadOp>(pointerArg.getLoc(), pointerArg);
+    mlir::Value targetArg;
+    bool hasTarget = argList.size() == 2;
+    if (hasTarget) {
+      targetArg = emitExpression(argList[1], true);
+      targetArg =
+          builder.create<FC::GetPointerToOp>(targetArg.getLoc(), targetArg);
+    } else {
+      targetArg = builder.create<FC::NullPointerOp>(pointerArg.getLoc(),
+                                                    pointerArg.getType());
+    }
+    auto cmp = builder.create<FC::CmpPointerEqualOp>(
+        targetArg.getLoc(), builder.getIntegerType(1), pointerArg, targetArg);
+    if (hasTarget) {
+      return cmp.getResult();
+    }
+    // Not Pointer type.
+    return getMLIRLogicalOp({}, cmp, fc::ast::LogicalOpKind::NOT);
   }
   default:
     return nullptr;
@@ -794,21 +851,6 @@ mlir::Value CodeGen::emitExpression(Expr *expr, bool isLHS) {
           builder.create<mlir::ConstantFloatOp>(mlirloc, floatVal, floatTy);
       return constant.getResult();
     }
-    /*
-    if (type->isRealTy()) {
-      auto floatVal = llvm::APFloat((float)Const->getFloat());
-      auto constant = builder.create<mlir::ConstantFloatOp>(
-          mlirloc, floatVal, mlir::FloatType::getF32(&mlirContext));
-      return constant.getResult();
-    }
-    if (type->isDoubleTy()) {
-      auto floatVal = llvm::APFloat(Const->getFloat());
-      auto constant = builder.create<mlir::ConstantFloatOp>(
-          mlirloc, floatVal, mlir::FloatType::getF64(&mlirContext));
-      return constant.getResult();
-    }
-    */
-
     auto ArrTy = llvm::dyn_cast<ArrayType>(type);
     if ((ArrTy && ArrTy->getElementTy()->isStringCharTy()) ||
         type->isCharacterTy()) {
@@ -831,6 +873,24 @@ mlir::Value CodeGen::emitExpression(Expr *expr, bool isLHS) {
       return constant.getResult();
     }
 
+    if (type->isComplexTy()) {
+      auto mlirType = cgHelper->getMLIRTypeFor(type);
+      auto complexTy = static_cast<fc::ComplexType *>(type);
+      auto loc = getLoc(expr->getSourceLoc());
+      auto &values = Const->getConstant()->getArrValue();
+      assert(values.size() == 2);
+      mlir::ArrayAttr attr;
+      if (complexTy->getKind() == 8) {
+        attr = builder.getF64ArrayAttr(
+            {std::stod(values[0]), std::stod(values[1])});
+      } else {
+        attr = builder.getF32ArrayAttr(
+            {std::stof(values[0]), std::stof(values[1])});
+      }
+      auto constant =
+          builder.create<FC::ComplexConstantOp>(loc, mlirType, attr);
+      return constant.getResult();
+    }
     llvm_unreachable("unknown constant type");
   }
 
@@ -843,6 +903,12 @@ mlir::Value CodeGen::emitExpression(Expr *expr, bool isLHS) {
         (Alloca.isa<mlir::BlockArgument>() &&
          Alloca.getType().isa<mlir::IndexType>()))
       return Alloca;
+
+    auto refType = Alloca.getType().cast<FC::RefType>();
+
+    if (refType.getEleTy().isa<FC::PointerType>()) {
+      Alloca = emitLoadInstruction(Alloca, objName->getName());
+    }
     return emitLoadInstruction(Alloca, objName->getName());
   }
 
@@ -880,6 +946,11 @@ mlir::Value CodeGen::emitExpression(Expr *expr, bool isLHS) {
     // Concat operates on char arrays, but isn't translated to an MLIR array op.
     if (lhsVal.getType().isa<FC::ArrayType>() && OpKind != BinaryOpKind::Concat)
       return getMLIRArrayBinaryOp(lhsVal, rhsVal, OpKind);
+
+    if (rhsVal.getType().isa<mlir::ComplexType>()) {
+      assert(lhsVal.getType().isa<mlir::ComplexType>());
+      return getMLIRComplexBinaryOp(lhsVal, rhsVal, OpKind);
+    }
 
     return getMLIRBinaryOp(lhsVal, rhsVal, OpKind);
   }

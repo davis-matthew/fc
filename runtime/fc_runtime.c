@@ -1,9 +1,9 @@
 #include <ctype.h>
+#include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
-#include <pthread.h>
 
 pthread_mutex_t lock;
 
@@ -88,6 +88,13 @@ static inline void printScalar(IOTypeKind kind, va_list *list) {
     break;
   case string:
     printf(" %-19s", va_arg(*list, char *));
+    break;
+  case complex_float:
+    printf("  (%f, %f)", va_arg(*list, float), va_arg(*list, float));
+    break;
+  // TODO : Still printing the float value?
+  case complex_double:
+    printf("  (%.8lf, %.8lf)", va_arg(*list, double), va_arg(*list, double));
     break;
   };
 }
@@ -424,6 +431,14 @@ static inline void handleElement(va_list *list, int *numArgs, FILE *fd,
       case double_precision:
         printf("%13.8lf", ((double *)arr)[i]);
         break;
+      case complex_double:
+        printf("(%.8lf, %.8lf)", ((double *)arr)[2 * i],
+               ((double *)arr)[2 * i + 1]);
+        break;
+      case complex_float:
+        printf("(%.8lf, %.8lf)", ((float *)arr)[2 * i],
+               ((float *)arr)[2 * i + 1]);
+        break;
       };
 
       if (baseKind != int8)
@@ -489,15 +504,15 @@ static inline void handleElement(va_list *list, int *numArgs, FILE *fd,
 }
 
 // Handling fortran STOP statements!'
-extern void __fc_runtime_stop_int(const int expr){
-  if(expr == 0)
+extern void __fc_runtime_stop_int(const int expr) {
+  if (expr == 0)
     exit(0);
-  printf("STOP %d\n" , expr);
+  printf("STOP %d\n", expr);
   exit(expr);
 }
 
-extern void __fc_runtime_stop_string(const char* string){
-  printf("STOP %s\n" , string);
+extern void __fc_runtime_stop_string(const char *string) {
+  printf("STOP %s\n", string);
   exit(0);
 }
 
@@ -574,12 +589,11 @@ extern int __fc_runtime_open(int unit, const char *fileName) {
 
   FILE *file = fopen(fileName, "ab+");
 
-
   if (file == NULL) {
     fprintf(stderr, "\nFC RUNTIME: failed to open the file %s\n", fileName);
     perror(fileName);
     return 1;
-    //exit(1);
+    // exit(1);
   }
 
   units[newIndex] = unit;
@@ -745,31 +759,31 @@ extern void __fc_runtime_sprintf(int numArgs, char *dest, ...) {
   va_list list;
   int i;
   va_start(list, dest);
-  while(numArgs > 0) {
+  while (numArgs > 0) {
     IOTypeKind kind = (IOTypeKind)(va_arg(list, int));
     numArgs--;
 
-    switch(kind) {
-      case int32:
-        sprintf(dest, "%s%d", dest, va_arg(list, int));
-        break;
-      case int64:
-        sprintf(dest, "%s%ld", dest, va_arg(list, long int));
-        break;
-      case float32: {
-        double d = va_arg(list, double);
-        sprintf(dest, "%s%f", dest, (float)d);
-        break;
-      }
-      case double_precision:
-        sprintf(dest, "%s%lf", dest, va_arg(list, double));
-        break;
-      case string:
-        sprintf(dest, "%s%s", dest, va_arg(list, char *));
-        break;
-      default:
-        fprintf(stderr, "Unhanled type %d in sprintf", (int)kind);
-        break;
+    switch (kind) {
+    case int32:
+      sprintf(dest, "%s%d", dest, va_arg(list, int));
+      break;
+    case int64:
+      sprintf(dest, "%s%ld", dest, va_arg(list, long int));
+      break;
+    case float32: {
+      double d = va_arg(list, double);
+      sprintf(dest, "%s%f", dest, (float)d);
+      break;
+    }
+    case double_precision:
+      sprintf(dest, "%s%lf", dest, va_arg(list, double));
+      break;
+    case string:
+      sprintf(dest, "%s%s", dest, va_arg(list, char *));
+      break;
+    default:
+      fprintf(stderr, "Unhanled type %d in sprintf", (int)kind);
+      break;
     }
 
     numArgs--;
@@ -780,7 +794,7 @@ extern void __fc_runtime_sprintf(int numArgs, char *dest, ...) {
 // Not sure how clock is calculared. ifort, gfortran, flang give
 // diffent outputs. We return epoch!
 extern void __fc_runtime_isysClock(int *clock, int *rate, int *max) {
-  *clock = (int) time(NULL);
+  *clock = (int)time(NULL);
   *rate = CLOCKS_PER_SEC;
   *max = (1 << ((sizeof(*max) * 8) - 1)) - 1;
 }

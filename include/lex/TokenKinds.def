@@ -137,6 +137,8 @@ KEYWORD(target)
 // openmp
 KEYWORD(omp)
 KEYWORD(parallel)
+KEYWORD(single)
+KEYWORD(master)
 
 // Tokens helpful for parsing.
 TOKEN(unary_minus) // - for unary.

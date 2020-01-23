@@ -4,7 +4,8 @@
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are met:
 //
-// 1. Redistributions of source code must retain the above copyright notice, this
+// 1. Redistributions of source code must retain the above copyright notice,
+// this
 //    list of conditions and the following disclaimer.
 //
 // 2. Redistributions in binary form must reproduce the above copyright notice,
@@ -13,14 +14,15 @@
 //
 // THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
 // AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-// DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-// FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-// DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-// SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-// CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-// OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+// CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+// POSSIBILITY OF SUCH DAMAGE.
 #include "AST/ASTContext.h"
 #include "AST/ProgramUnit.h"
 #include "codegen/CGASTHelper.h"
@@ -33,8 +35,8 @@
 #include "sema/Sema.h"
 #include "transforms/FCMLIRPass.h"
 
-#include "dialect/FCOps/FCOps.h"
-#include "dialect/OpenMPOps/OpenMPOps.h"
+#include "dialect/FC/FCOps.h"
+#include "dialect/OpenMP/OpenMPOps.h"
 
 #include "llvm/Analysis/TargetLibraryInfo.h"
 #include "llvm/Analysis/TargetTransformInfo.h"
@@ -293,7 +295,6 @@ static bool runLLVMPasses(std::unique_ptr<llvm::Module> &llvmModule,
     FC_DEBUG(debug() << "Emitting LLVM BC before optimizations\n");
     llvm::WriteBitcodeToFile(*llvmModule.get(), OS);
     OS.flush();
-    OS.close();
     return true;
   }
 
@@ -301,7 +302,6 @@ static bool runLLVMPasses(std::unique_ptr<llvm::Module> &llvmModule,
     FC_DEBUG(debug() << "Emitting LLVM IR\n");
     llvmModule->print(OS, nullptr);
     OS.flush();
-    OS.close();
     return true;
   }
 
@@ -344,7 +344,6 @@ static bool runLLVMPasses(std::unique_ptr<llvm::Module> &llvmModule,
     FC_DEBUG(debug() << "Emitting LLVM BC after optimizations\n");
     llvm::WriteBitcodeToFile(*llvmModule, OS);
     OS.flush();
-    OS.close();
     return true;
   }
 
@@ -352,7 +351,6 @@ static bool runLLVMPasses(std::unique_ptr<llvm::Module> &llvmModule,
     FC_DEBUG(debug() << "Emitting LLVM IR after optimizations\n");
     llvmModule->print(OS, nullptr);
     OS.flush();
-    OS.close();
     return true;
   }
   return true;
@@ -380,7 +378,7 @@ static void addLowerLevelMLIROptPasses(mlir::PassManager &mlirPM) {
     mlirPM.addPass(createForOpConverterPass());
     mlirPM.addPass(createSimplifyLoopMemOperations());
     mlirPM.addPass(createFCDoConverterPass());
-    // mlirPM.addPass(createLNODriverPass());
+    //mlirPM.addPass(createLNODriverPass());
   }
   mlirPM.addPass(mlir::createLoopFusionPass(2, 1000, true));
   mlirPM.addPass(mlir::createLoopUnrollAndJamPass(-1));
@@ -546,7 +544,6 @@ static bool compileFile(StringRef InputFile) {
     FC_DEBUG(debug() << "Emitting the raw AST\n");
     parser.dumpParseTree(OS);
     OS.flush();
-    OS.close();
     return true;
   }
 
@@ -560,7 +557,6 @@ static bool compileFile(StringRef InputFile) {
     FC_DEBUG(debug() << "Emitting the AST after SEMA\n");
     parser.dumpParseTree(OS);
     OS.flush();
-    OS.close();
     return true;
   }
 
@@ -600,7 +596,6 @@ static bool compileFile(StringRef InputFile) {
   if (emitMLIRCode) {
     theModule->print(OS);
     OS.flush();
-    OS.close();
     return true;
   }
 
@@ -667,7 +662,6 @@ static bool compileFile(StringRef InputFile) {
 
   // Run all codegen passes.
   CGPasses.run(*llvmModule.get());
-  TOS.close();
 
   if (StopAtCompile)
     return true;

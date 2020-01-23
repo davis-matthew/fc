@@ -4,7 +4,8 @@
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are met:
 //
-// 1. Redistributions of source code must retain the above copyright notice, this
+// 1. Redistributions of source code must retain the above copyright notice,
+// this
 //    list of conditions and the following disclaimer.
 //
 // 2. Redistributions in binary form must reproduce the above copyright notice,
@@ -13,14 +14,15 @@
 //
 // THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
 // AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-// DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-// FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-// DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-// SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-// CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-// OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+// CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+// POSSIBILITY OF SUCH DAMAGE.
 #include "codegen/CGASTHelper.h"
 
 #include "AST/ProgramUnit.h"
@@ -28,7 +30,7 @@
 #include "AST/Type.h"
 #include "common/Debug.h"
 
-#include "dialect/FCOps/FCOps.h"
+#include "dialect/FC/FCOps.h"
 
 using namespace fc;
 using namespace ast;
@@ -64,6 +66,12 @@ mlir::Type CGASTHelper::getMLIRTypeFor(fc::Type *type) {
     return mlir::FloatType::getF32(LLC);
   case fc::Type::DoubleID:
     return mlir::FloatType::getF64(LLC);
+  case fc::Type::ComplexID: {
+    auto ty = static_cast<fc::ComplexType *>(type);
+    auto elety = ty->getKind() == 4 ? mlir::FloatType::getF32(LLC)
+                                    : mlir::FloatType::getF64(LLC);
+    return mlir::ComplexType::get(elety);
+  }
   case fc::Type::DummyArgID:
   case fc::Type::UndeclaredID:
   case fc::Type::UndeclaredFnID:
@@ -71,7 +79,9 @@ mlir::Type CGASTHelper::getMLIRTypeFor(fc::Type *type) {
     llvm_unreachable("Found unhandled type in codegen");
 
   case fc::Type::PointerID: {
-    llvm_unreachable("Pointer type not handled");
+    auto ptrTy = static_cast<fc::PointerType *>(type);
+    auto baseTy = getMLIRTypeFor(ptrTy->getElementType());
+    return FC::PointerType::get(baseTy);
   }
   // Array type:
   case fc::Type::ArrayID: {

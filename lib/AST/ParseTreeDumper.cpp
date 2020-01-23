@@ -4,7 +4,8 @@
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions are met:
 //
-// 1. Redistributions of source code must retain the above copyright notice, this
+// 1. Redistributions of source code must retain the above copyright notice,
+// this
 //    list of conditions and the following disclaimer.
 //
 // 2. Redistributions in binary form must reproduce the above copyright notice,
@@ -13,14 +14,15 @@
 //
 // THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
 // AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
-// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-// DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
-// FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
-// DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
-// SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
-// CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
-// OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
-// OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE
+// LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+// CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+// SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+// INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+// CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+// ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
+// POSSIBILITY OF SUCH DAMAGE.
 #include "AST/ASTContext.h"
 #include "AST/Declaration.h"
 #include "AST/Expressions.h"
@@ -299,11 +301,21 @@ std::string Stmt::dump(llvm::raw_ostream &OS, int level) const {
 std::string ConstantVal::dump(llvm::raw_ostream &OS, int level) const {
 
   auto constant = getConstant();
-  if (!constant->getType()->isArrayTy()) {
+
+  if (!constant->getType()->isArrayTy() &&
+      !constant->getType()->isComplexTy()) {
     return getValue();
   }
 
-  std::string constVal = "{";
+  std::string constVal = "(";
+  auto &arrVal = constant->getArrValue();
+  if (constant->getType()->isComplexTy()) {
+    constVal += arrVal[0] + ", ";
+    constVal += arrVal[1] + ")";
+    return constVal;
+  }
+
+  constVal = "{";
   for (auto val : constant->getArrValue()) {
     constVal += val + ", ";
   }
@@ -1200,9 +1212,33 @@ std::string OpenMPParallelStmt::dump(llvm::raw_ostream &OS, int level) const {
   return "";
 }
 
+std::string OpenMPSingleStmt::dump(llvm::raw_ostream &OS, int level) const {
+  os << "// " << getLocString(this->getSourceLoc()) << "\n";
+  os << "omp single {\n";
+  getBlock()->dump(OS, level + 2);
+  os << "}\n";
+  return "";
+}
+
+std::string OpenMPMasterStmt::dump(llvm::raw_ostream &OS, int level) const {
+  os << "// " << getLocString(this->getSourceLoc()) << "\n";
+  os << "omp master {\n";
+  getBlock()->dump(OS, level + 2);
+  os << "}\n";
+  return "";
+}
+
 std::string OpenMPParallelDoStmt::dump(llvm::raw_ostream &OS, int level) const {
   os << "// " << getLocString(this->getSourceLoc()) << "\n";
   os << "omp parallel do {\n";
+  getDoStmt()->dump(OS, level + 2);
+  os << "}\n";
+  return "";
+}
+
+std::string OpenMPDoStmt::dump(llvm::raw_ostream &OS, int level) const {
+  os << "// " << getLocString(this->getSourceLoc()) << "\n";
+  os << "omp do {\n";
   getDoStmt()->dump(OS, level + 2);
   os << "}\n";
   return "";

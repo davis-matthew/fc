@@ -6,7 +6,7 @@ A new front end for Fortran has been written in the design spirit of LLVM/Clang.
 ```
 1. Clang 7.0.1 -http://releases.llvm.org/download.html
 2. llvm-project - https://github.com/compiler-tree-technologies/llvm-project.
-3. gfortran  7.1.0 (for running unit tests)
+3. sudo apt install libomp-dev for running OpenMP related programs.
 ```
 
 ## Build instructions
@@ -30,11 +30,10 @@ export PATH=${CLANG_701}/bin:$PATH
 
 6. mkdir <fc-build-path>/build && cd build
 
-7. FC build instructions (shared libs build doesn't work, LLD-7.0.1 is much faster compared to /bin/ld)
-cmake -G Ninja -DLLVM_DIR=${LLVM_PROJECT_BUILD}/lib/cmake/llvm/ ../fc \
+7. FC build instructions (shared libs build doesn't work)
+cmake -G Ninja -DLLVM_DIR=${LLVM_PROJECT_INSTALL}/lib/cmake/llvm/ ../fc \
  -DCMAKE_INSTALL_PREFIX=<install-prefix> -DCMAKE_C_COMPILER=clang \
- -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_C_FLAGS="-fuse-ld=lld" \
- -DCMAKE_CXX_FLAGS="-fuse-ld=lld"
+ -DCMAKE_CXX_COMPILER=clang++ -DLLVM_BUILD_DIR=<path/to/llvm-project/build>
 
 8. ninja install
 
@@ -45,14 +44,16 @@ export LD_LIBRARY_PATH=${FC_BUILD}/lib:$LD_LIBRARY_PATH
 export LIBRARY_PATH=${FC_BUILD}build/lib:$LIBRARY_PATH
 export CLANG_BINARY=${CLANG_701}/bin/clang
 
-10. ninja test to run eixsting tests.
+10. ninja check-all to run eixsting tests.
 
 ```
 
+
 ### Notes
-1. Shared libs build doesn't work (MLIR libs has some issues)
-2. ninja test to run the test suite.
-3. During FC build cmake will look for mlir-tblgen in ${DLLVM_DIR}/../../../bin . If not found build will fail.
+1. **Use fc branch in llvm-project for building llvm**
+2. Use llvm-project install directory for LLVM_DIR cmake variable.
+3. Path specified in DLLVM_BUILD_DIR=<path/to/llvm-project/build> is used to find **llvm-lit** for running test suite.
+4. Shared libs build doesn't work (MLIR libs has some issues)
 
 ## Running HelloWorld
 
@@ -64,6 +65,15 @@ end program hello
 $ <path/to/fc>/bin/fc hello.f90
 $ ./a.out
 Hello world!
+```
+
+## Testing
+```
+1. Run all tests
+  $ ninja check-all
+
+2. Run Individual test from build directory
+  $ llvm-lit test/<path/to/test>
 ```
 
 ## Intermediate Representations

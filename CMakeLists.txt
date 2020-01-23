@@ -12,11 +12,23 @@ find_package(LLVM REQUIRED CONFIG)
 
 message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
 message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
-set(LLVM_INSTALL_DIR ${LLVM_DIR}/../../../)
-message(STATUS "Using llvm install directory ${LLVM_INSTALL_DIR}")
-
+message(STATUS "Using LLVM install directory ${LLVM_BINARY_DIR}")
+message(STATUS "Using LLVM build directory ${LLVM_BUILD_DIR}")
 
 include_directories(${LLVM_INCLUDE_DIRS})
+
+list(APPEND CMAKE_MODULE_PATH "${LLVM_DIR}")
+include(AddLLVM)
+include(LLVMConfig)
+ 
+
+# TODO: Use llvm-config to get the data.
+if(NOT LLVM_BUILD_DIR)
+  message(FATAL_ERROR "LLVM_BUILD_DIR not found")
+endif()
+set (LLVM_BUILD_TOOLS_DIR ${LLVM_BUILD_DIR}/bin)
+set(LLVM_EXTERNAL_LIT ${LLVM_BUILD_TOOLS_DIR}/llvm-lit CACHE STRING "Command used to spawn lit")
+message(STATUS "LIT ${LLVM_EXTERNAL_LIT}")
 
 #TODO: This is to handle the current static registration, but should be
 # factored out a bit.
@@ -31,7 +43,7 @@ function(whole_archive_link target)
       string(CONCAT link_flags ${link_flags} "/WHOLEARCHIVE:${LIB} ")
     ENDFOREACH(LIB)
   else()
-    set(link_flags "-L${LLVM_INSTALL_DIR}/lib -Wl,--whole-archive,")
+    set(link_flags "-L${LLVM_BINARY_DIR}/lib -Wl,--whole-archive,")
     FOREACH(LIB ${ARGN})
       string(CONCAT link_flags ${link_flags} "-l${LIB},")
     ENDFOREACH(LIB)
@@ -41,8 +53,6 @@ function(whole_archive_link target)
 endfunction(whole_archive_link)
 
 add_definitions(${LLVM_DEFINITIONS})
-
-enable_testing()
 
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
@@ -56,13 +66,12 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR} include/)
 include_directories(${CMAKE_CURRENT_BINARY_DIR}/include)
 
 #TODO Take mlir-tblgen path from cmake
-set(MLIR_TABLEGEN_EXE ${LLVM_INSTALL_DIR}/bin/mlir-tblgen)
+set(MLIR_TABLEGEN_EXE ${LLVM_BINARY_DIR}/bin/mlir-tblgen)
 
-list(APPEND CMAKE_MODULE_PATH "${LLVM_DIR}")
 include(TableGen)
 
 function(mlir_tablegen ofn)
-  tablegen(MLIR ${ARGV} "-I${MLIR_MAIN_SRC_DIR}" "-I${LLVM_INSTALL_DIR}/include" "-I${PROJECT_SOURCE_DIR}/include")
+  tablegen(MLIR ${ARGV} "-I${MLIR_MAIN_SRC_DIR}" "-I${LLVM_BINARY_DIR}/include" "-I${PROJECT_SOURCE_DIR}/include")
   set(TABLEGEN_OUTPUT ${TABLEGEN_OUTPUT} ${CMAKE_CURRENT_BINARY_DIR}/${ofn}
       PARENT_SCOPE)
 endfunction()
@@ -71,9 +80,13 @@ endfunction()
 # for use by clang_complete, YouCompleteMe, etc.
 set(CMAKE_EXPORT_COMPILE_COMMANDS 1)
 
+set(FC_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR})
+set(FC_BINARY_DIR ${CMAKE_CURRENT_BINARY_DIR})
+set(FC_TOOLS_DIR ${CMAKE_CURRENT_BINARY_DIR}/bin)
+
+add_subdirectory(include/dialect)
 add_subdirectory(lib)
 add_subdirectory(runtime)
 add_subdirectory(tools)
 add_subdirectory(test)
 add_subdirectory(utils)
-add_subdirectory(include/dialect)
