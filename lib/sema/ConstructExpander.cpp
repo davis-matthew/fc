@@ -526,7 +526,7 @@ public:
     if (!remainingExprs.empty()) {
       Expr *newUnit = unit ? unit->clone() : nullptr;
 
-      // adavance is a constant, can be reused
+      // advance is a constant, can be reused
       auto newWrite = builder.buildWriteStmt(remainingExprs, loc, newUnit,
                                              format, advance, iostat);
 
@@ -544,9 +544,9 @@ public:
 
     if (auto entity = llvm::dyn_cast<EntityDecl>(currStmt)) {
 
-      // TODO : Currently emitting assignemts inside first executable block.
+      // TODO : Currently emitting assignments inside first executable block.
       //        Is this right way to do this?
-      //        Other way to deal with this is emit one long string consiting of
+      //        Other way to deal with this is emit one long string consisting of
       //        all const strings with appropriate paddings!
 
       auto sym = entity->getSymbol();
@@ -570,7 +570,7 @@ public:
 
       auto bounds = arrayTy->getBoundsList();
 
-      // Only hanlding 2d arrays
+      // Only handling 2d arrays
       assert(bounds.size() == 2);
 
       auto size = bounds[0].first = bounds[0].second;
