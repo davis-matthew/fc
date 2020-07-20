@@ -170,7 +170,7 @@ mlir::Value OpenMPBuilder::getGlobalIdent(mlir::Location loc,
 
   Value init = rewriter.create<LLVM::UndefOp>(loc, structTy);
 
-  // FIXME : Currently these values are taken from clang genrated ir
+  // FIXME : Currently these values are taken from clang generated ir
   init = rewriter.create<LLVM::InsertValueOp>(loc, structTy, init, zero,
                                               rewriter.getI64ArrayAttr(0));
   init = rewriter.create<LLVM::InsertValueOp>(loc, structTy, init, two,
@@ -322,7 +322,7 @@ LLVMFuncOp OpenMPBuilder::createOutlinedFunctionFor(OMP::ParallelDoOp op) {
   llvm::SmallVector<mlir::Value, 2> args(op.args());
   OpBuilder rewriter(op);
 
-  // TODO Should be unique across applicaton, what should be suffix ?
+  // TODO Should be unique across application, what should be suffix ?
   //      Line number ?
   static int suffix = 1;
   std::string fnName = outlinedPrefix;
