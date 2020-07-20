@@ -143,7 +143,7 @@ Module *Parser::parseModule() {
 
   ProgramUnitList PUList;
 
-  // Ignore private and public memebers for now!
+  // Ignore private and public members for now!
   while (is(tok::kw_private) || is(tok::kw_public)) {
     consumeToken();
     while (isNot(tok::eol)) {
@@ -398,7 +398,7 @@ ProgramUnit *Parser::parseInternalSubprogram() {
         consumeToken();
         continue;
       }
-      llvm_unreachable("Token not hanlded yet.");
+      llvm_unreachable("Token not handled yet.");
     };
   }
   return nullptr;
