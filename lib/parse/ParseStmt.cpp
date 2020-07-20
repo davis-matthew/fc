@@ -114,7 +114,7 @@ ReadStmt *Parser::parseReadStmt() {
       if (isNot(tok::star)) {
         format = parseFormat(tok::r_paren);
       } else {
-        consumeToken(); // consumen *,
+        consumeToken(); // consume *,
       }
     }
 
@@ -204,7 +204,7 @@ WriteStmt *Parser::parseWriteStmt() {
             getToken().getRef(),
             getTypeFor(currTokenKind, getToken().constantTypeSize, true),
             getCurrLoc());
-        consumeToken(); // consumen the next token
+        consumeToken(); // consume the next token
       } else if (is(tok::kw_iostat)) {
         consumeToken(); // "= "
         iostat = parseExpr();
@@ -271,7 +271,7 @@ OpenStmt *Parser::parseOpenStmt() {
 
   // Step 1. Consume the unit,
   // unit -> [unit] scalar-int-expr
-  // Cosume unit/expression
+  // Consume unit/expression
   consumeToken();
   if (is(tok::kw_unit)) {
     // Consume =
@@ -339,7 +339,7 @@ OpenStmt *Parser::parseOpenStmt() {
     assert(statusKind != StatusKind::undefined);
   }
 
-  // cosume the r_paren
+  // consume the r_paren
   consumeToken();
 
   return builder.buildOpenStmt(loc, unit, file, statusKind, iostat, specList);
@@ -356,7 +356,7 @@ CloseStmt *Parser::parseCloseStmt() {
 
   // Step 1. Consume the unit,
   // unit -> [unit] scalar-int-expr
-  // Cosume unit/expression
+  // Consume unit/expression
   consumeToken();
   if (is(tok::kw_unit)) {
     // consume =
@@ -386,7 +386,7 @@ CloseStmt *Parser::parseCloseStmt() {
     }
   }
 
-  // cosume the r_paren
+  // consume the r_paren
   consumeToken();
   return builder.buildCloseStmt(loc, unit, iostat);
 }
@@ -424,7 +424,7 @@ DeAllocateStmt *Parser::parseDeAllocateStmt() {
   return builder.buildDeAllocateStmt(deAllocateObjectList, loc, stat);
 }
 
-// allocatae-stmt
+// allocate-stmt
 AllocateStmt *Parser::parseAllocateStmt() {
   assert(is(tok::kw_allocate));
   SourceLoc loc = getCurrLoc();
@@ -438,7 +438,7 @@ AllocateStmt *Parser::parseAllocateStmt() {
     auto objectName = expectIdentifier();
     auto objectSym = context.currSymTable->getOrInsertSymbol(
         objectName, Type::getUndeclaredFnTy(FC), loc);
-    // consumen l_paren
+    // consume l_paren
     consumeToken();
     auto arraySpec = parseArraySpec();
 
@@ -944,7 +944,7 @@ bool Parser::parseActionStmt(StmtList &stmtList, bool consume) {
     }
   }
 
-  // An assingment statement where LHS is identifier which is also key word
+  // An assignment statement where LHS is identifier which is also key word
   // Symbol has to be in the symbol table and should follow with
   // equals or l_paren in case of array element and shouldn't be intrinsic.
   auto sym = context.currSymTable->getSymbol(getToken().getRef());
