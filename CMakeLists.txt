@@ -60,7 +60,7 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 
 # Ignore unhandled switch cases for now.
 # Can be moved to C++11 . There are one or places which requires c++14. This can be easily changed.
-SET( CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -g -fno-rtti -std=c++14 -Wno-null-conversion -Wno-unused-command-line-argument" )
+SET( CMAKE_CXX_FLAGS  "${CMAKE_CXX_FLAGS} -g -fno-rtti -std=c++14 -Werror -Wall -Wno-null-conversion -Wno-unused-command-line-argument" )
 
 include_directories(${CMAKE_CURRENT_SOURCE_DIR} include/)
 include_directories(${CMAKE_CURRENT_BINARY_DIR}/include)
