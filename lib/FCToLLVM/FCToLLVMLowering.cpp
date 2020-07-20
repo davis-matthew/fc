@@ -1700,7 +1700,7 @@ public:
   }
 };
 
-// Convert the element type of the memref `t` to to an LLVM type using
+// Convert the element type of the memref `t` to an LLVM type using
 // `lowering`, get a pointer LLVM type pointing to the converted `t`,
 // wrap it into the MLIR LLVM dialect type and return.
 static mlir::Type getMemRefElementPtrType(FC::RefType t,
