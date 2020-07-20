@@ -198,7 +198,7 @@ struct MemToReg : public mlir::OperationPass<MemToReg, FC::FCFuncOp> {
   DominatorTree *domTree = nullptr;
   mlir::OpBuilder *builder = nullptr;
 
-  /// Contains a stable numbering of basic blocks to avoid non-determinstic
+  /// Contains a stable numbering of basic blocks to avoid non-deterministic
   /// behavior.
   llvm::DenseMap<mlir::Block *, unsigned> BBNumbers;
 
