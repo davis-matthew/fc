@@ -29,7 +29,7 @@
 // 3. Flattens the nested structure. All functions are now directly under
 // ModuleOp
 // 4. fc.fortran_module is removed and its variables are now fc.global.
-// 5. Emits a main function if it sees MainProgram in the current transalation
+// 5. Emits a main function if it sees MainProgram in the current translation
 // unit.
 //===----------------------------------------------------------------------===//
 
