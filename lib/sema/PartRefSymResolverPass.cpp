@@ -94,7 +94,7 @@ public:
     ProgramUnit *structPU = outerStruct->getSymTable()->getProgramUnit();
     // FIXME! This is weird! A symbol should always have a PU. This happens when
     // the symbol is imported from a .mod. We need to unify this origSymbol vs
-    // Symbol differnce.
+    // Symbol difference.
     if (!structPU) {
       outerStruct = getSymbol(partRefs[0]);
       structPU = outerStruct->getSymTable()->getProgramUnit();
