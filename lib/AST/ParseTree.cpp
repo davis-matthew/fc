@@ -114,7 +114,7 @@ void Block::replaceWith(Stmt *newStmt, Stmt *existingStmt) {
 
 Block::Block(StmtList &stmts, SourceLoc loc) : Stmt(BlockKind, loc) {
   for (auto stmt : stmts) {
-    /// Paarent of expression nodes are the actual
+    /// Parent of expression nodes are the actual
     // instructions.
     if (llvm::isa<Expr>(stmt))
       continue;
