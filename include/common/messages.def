@@ -1,13 +1,13 @@
 
 // Main program related errors.
 ERROR(mp_stmt_err, PROGRAM name expected)
-ERROR(mp_end_stmt_err1, END PROGRAM statment not found)
+ERROR(mp_end_stmt_err1, END PROGRAM statement not found)
 ERROR(mp_end_stmt_err2,
-      program name is different.Expected Program statment name)
+      program name is different.Expected Program statement name)
 
 ERROR(program_no_intent, This program Unit cannot have intent)
 
-// Erorr related to indetifiers.
+// Error related to identifiers.
 ERROR(ident_err1, Identifier expected here)
 
 // Type related errors.
@@ -16,9 +16,9 @@ ERROR(illegal_derived_type_decl, Error parsing derived type decl/def statement)
 
 // Declaration related errors.
 ERROR(decl_colon_error, Expected two colons.Only one found)
-ERROR(decl_double_colon_error, Epxected double colon when initialization found.)
+ERROR(decl_double_colon_error, Expected double colon when initialization found.)
 
-// Array spec delcaration errors
+// Array spec declaration errors
 ERROR(arr_expect_upper_bound, Expected array upper bound integer here)
 ERROR(arr_spec_end, Expected end of array spec dimension here)
 ERROR(arr_spec_expect_another_dim, Expected another dimension here)
@@ -41,8 +41,8 @@ ERROR(err_closestmt, Error parsing close stmt)
 ERROR(err_allocstmt, Error parsing allocate stmt)
 ERROR(exp_eol, Expecting end - of - line here.)
 ERROR(exp_token, Expecting token)
-ERROR(err_paramstmt, Error parsing paramter statment)
-ERROR(err_nullifystmt, Error parsing nullify statment)
+ERROR(err_paramstmt, Error parsing parameter statement)
+ERROR(err_nullifystmt, Error parsing nullify statement)
 
 // IF stmt
 ERROR(exp_end_if, Expecting END IF construct here)
@@ -55,8 +55,8 @@ ERROR(exp_equals, Expecting equals here)
 ERROR(exp_comma, Expecting comma here)
 ERROR(exp_only, expecting only keyword here)
 
-ERROR(exp_l_paren, Expecing open parenthesis here)
-ERROR(exp_r_paren, Expecing closed parenthesis here)
+ERROR(exp_l_paren, Expecting open parenthesis here)
+ERROR(exp_r_paren, Expecting closed parenthesis here)
 
 ERROR(symbol_not_subroutine, Variable is not subroutine)
 ERROR(symbol_not_function, Variable is not function)
@@ -73,7 +73,7 @@ ERROR(expect_none, Expecting Keyword none here !)
 ERROR(already_delcared_here, Already declared here)
 
 ERROR(expect_case, Expecting case keyword here)
-ERROR(expect_eol, Expecing end of line here)
+ERROR(expect_eol, Expecting end of line here)
 ERROR(error_in_expr, syntax error in expression)
 ERROR(error_in_implied_do, Error in ac - implied - do statement)
 ERROR(invalid_range_expr, invalid range expression)
