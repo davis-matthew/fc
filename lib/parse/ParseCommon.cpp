@@ -148,7 +148,7 @@ bool Parser::expect(TokenKind kind) {
 }
 
 // Expect the next token to be of kind.
-// If not print dignostics
+// If not print diagnostics
 bool Parser::expect(TokenKind kind, diag::ErrorKind errorKind) {
   consumeToken();
   if (is(kind))
@@ -251,7 +251,7 @@ llvm::StringRef Parser::expectIdentifier(bool consumeCurrent) {
 
 llvm::StringRef Parser::checkIdentifier() {
   // Get the identifier name.
-  // Treat keywords which appear in the place of identifiers as identifers.
+  // Treat keywords which appear in the place of identifiers as identifiers.
   if (isNot(tok::identifier) && !utils::isKeywordToken(currTokenKind)) {
     Diag.printError(getCurrLoc(), diag::ident_err1);
     return llvm::StringRef();
