@@ -209,7 +209,7 @@ Token Lexer::getNextToken() {
         typeSize = Info.typeSize;
       }
     } else if (Info.hasAlphabet && Info.hasDigits) {
-      // indentifier.
+      // identifier.
       kind = tok::identifier;
     } else if (Info.hasAlphabet && !Info.hasDigits) {
       // can be a keyword.
