@@ -66,7 +66,7 @@ public:
 
     auto functionType = llvm::dyn_cast<FunctionType>(sym->getType());
 
-    // If the functin type is not known can't replace
+    // If the function type is not known can't replace
     if (!functionType)
       return true;
 
