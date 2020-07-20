@@ -436,7 +436,7 @@ bool CodeGen::emitLoopIfOperation(IfElseStmt *stmt) {
 
 bool CodeGen::emitIfElseStmt(IfElseStmt *stmt) {
 
-  // Thi is inside the structure loop like operation.
+  // This is inside the structure loop like operation.
   if (context.currRegion) {
     return emitLoopIfOperation(stmt);
   }
