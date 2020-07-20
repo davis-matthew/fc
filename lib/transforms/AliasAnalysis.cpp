@@ -161,7 +161,7 @@ AliasResult AliasAnalysis::alias(mlir::Value srcPtr, mlir::Value dstPtr) {
   auto srcAddrOfOp = dyn_cast_or_null<FC::AddressOfOp>(srcDefOp);
   auto dstAddrOfOp = dyn_cast_or_null<FC::AddressOfOp>(dstDefOp);
 
-  // Globas doesn't alias with others.
+  // Globals do not alias with others.
   if (srcAddrOfOp && dstAddrOfOp) {
     return (srcAddrOfOp == dstAddrOfOp) ? MustAlias : NoAlias;
 
@@ -190,7 +190,7 @@ AliasResult AliasAnalysis::alias(mlir::Value srcPtr, mlir::Value dstPtr) {
     return NoAlias;
   }
 
-  // TODO: Hanlde FC.arrayele
+  // TODO: Handle FC.arrayele
   return MayAlias;
 }
 
