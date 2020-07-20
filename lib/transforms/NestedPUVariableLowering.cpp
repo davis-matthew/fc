@@ -27,7 +27,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// All implicitly captured variables are explictly passed as arguments in this
+// All implicitly captured variables are explicitly passed as arguments in this
 // pass. This is part of high level to low level MLIR lowering.
 //===----------------------------------------------------------------------===//
 
@@ -169,7 +169,7 @@ private:
         allocaArgMap[argIndex.value()] = newArgs[argIndex.index()];
       }
 
-      // Replace all the acesses and also fix all the nested function calls.
+      // Replace all the accesses and also fix all the nested function calls.
       replaceAccessAndCalls(newFunc, parent, allocaArgMap, newArgs);
       child.erase();
     }
@@ -203,7 +203,7 @@ public:
         continue;
       lowerNestedFunctionsIn(mapEle.first, mapEle.second);
 
-      // Remove all the "implitcly captured" tags.
+      // Remove all the "implicitly captured" tags.
       auto parentOp = mapEle.first;
       parentOp.walk([&](FC::AllocaOp op) {
         op.setCaptured(mlir::BoolAttr::get(false, module.getContext()));
