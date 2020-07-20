@@ -262,7 +262,7 @@ ASTContextImpl::get(llvm::StringRef name, llvm::SmallVector<Type *, 2> &list,
 
 PointerType *ASTContextImpl::get(Type *elementTy) {
   // For the moment we are forcing new allocation due to the risk of recursing
-  // infintely in the type-key generation of self-referential pointers in
+  // infinitely in the type-key generation of self-referential pointers in
   // struct-types.
   if (elementTy->isStructTy())
     return new (FC, alignof(PointerType)) PointerType(elementTy, FC);
