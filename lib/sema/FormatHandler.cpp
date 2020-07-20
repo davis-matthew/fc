@@ -349,7 +349,7 @@ public:
         continue;
       }
 
-      // llvm::errs() << "unhanled " << data[0];
+      // llvm::errs() << "unhandled " << data[0];
       data++;
     }
 
