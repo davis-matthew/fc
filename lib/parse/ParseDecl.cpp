@@ -407,7 +407,7 @@ void Parser::parseTypeDeclStmt(StmtList &stmtList) {
   // Look for double colon. "::"
   // The double colon is optional when there is no
   // initialization of one of the members.
-  // But it is compulsory when ther is initialization.
+  // But it is compulsory when there is initialization.
   // C505
   bool hasDoubleColon = false;
   if (is(tok::colon)) {
