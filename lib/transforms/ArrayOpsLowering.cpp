@@ -25,7 +25,7 @@
 // POSSIBILITY OF SUCH DAMAGE.
 //===- ArrayOpsLoweringPass.cpp -   ---------------------------------------===//
 //
-// Lower array operatoins into fc.do loops.
+// Lower array operations into fc.do loops.
 // TODO: ArraySectionExpander AST pass should be completely moved here.
 //===----------------------------------------------------------------------===//
 
