@@ -302,7 +302,7 @@ public:
     // 1. If the module referred is in current program unit. emit module
     // file
     // 2. If not in current program, try to read the file.
-    // B. If the the current program unit is module, import all the used module
+    // B. If the current program unit is module, import all the used module
     // types in current.
     // C. Resolve the undeclared symbols in the current program unit.
 
@@ -312,7 +312,7 @@ public:
       }
     }
 
-    // Dump the remaining modules which are not procesed yet.
+    // Dump the remaining modules which are not processed yet.
     for (auto PU : parseTree->getProgramUnitList()) {
       if (!PU->isModule())
         continue;
