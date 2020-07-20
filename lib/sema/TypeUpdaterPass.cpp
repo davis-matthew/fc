@@ -276,7 +276,7 @@ public:
         updateDerivedTypeDef(dtd);
       }
 
-      // 1. Update Arrray types in typedeclstmt.
+      // 1. Update Array types in typedeclstmt.
       updateEntityDeclStmts(specPart->getBlock()->getStmtList());
     }
 
