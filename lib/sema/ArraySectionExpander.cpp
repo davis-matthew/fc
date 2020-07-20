@@ -205,7 +205,7 @@ public:
 
       /*
        * FIXME: Comment this currently
-       * Uncommnting this might expose a bug!
+       * Uncommenting this might expose a bug!
       if (rangeExpr->getIndex()) {
         newSubs.push_back(rangeExpr->getIndex()->clone());
         continue;
