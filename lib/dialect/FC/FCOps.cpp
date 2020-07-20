@@ -297,7 +297,7 @@ void FCLoadOp::build(Builder *builder, OperationState &result, Value pointerVal,
   FC::ArrayType::Shape shape;
 
   // FIXME: Subscript range is linearly stored as operands
-  //. There is no way to retrieve the orignal SubscriptRange
+  //. There is no way to retrieve the original SubscriptRange
   // passed by the user. Hence, we are using the
   // SubscriptRangeAttr to hold that info and get the actual
   // Range info back. This has been done in StoreOp as well.
