@@ -487,7 +487,7 @@ Expr *Parser::_parseExprOperand(TokenKind prevTokenKind,
   }
 
   // This can be either an unresolved array reference or function call.
-  // Safetly putting it as unresolved function call for now. It should be
+  // Safely putting it as unresolved function call for now. It should be
   // resolved in sema, else throw error.
   if (type->isUndeclared()) {
     sym->setType(Type::getUndeclaredFnTy(FC));
