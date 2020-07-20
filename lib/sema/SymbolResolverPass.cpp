@@ -34,7 +34,7 @@ using namespace fc;
 using namespace ast;
 namespace fc {
 
-// Check for any undeclarared symbols which are not
+// Check for any undeclared symbols which are not
 // resolved and try it resolve it.
 class SymbolResolverPass : public ASTPUPass {
 
