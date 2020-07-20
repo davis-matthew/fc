@@ -98,7 +98,7 @@ bool CodeGen::emitOpenMPSingleStmt(OpenMPSingleStmt *stmt) {
 }
 
 // TODO : Most code in this function is repeated code from emitFCDoLoop.
-//        Genralise these two functions
+//        Generalize these two functions
 bool CodeGen::emitOpenMPDoStmt(OpenMPDoStmt *stmt) {
   auto oldRegion = context.currRegion;
 
