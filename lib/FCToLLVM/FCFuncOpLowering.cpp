@@ -104,7 +104,7 @@ public:
       attributes.push_back(attr);
     }
 
-    // Create an LLVM funcion, use external linkage by default until MLIR
+    // Create an LLVM function, use external linkage by default until MLIR
     // functions have linkage.
     auto newFuncOp = rewriter.create<LLVM::LLVMFuncOp>(
         op->getLoc(), funcOp.getName(), llvmType, LLVM::Linkage::External,
