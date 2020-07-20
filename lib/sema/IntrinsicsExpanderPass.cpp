@@ -161,7 +161,7 @@ public:
     auto eleAssignment1 =
         builder.buildAssignmentStmt(resultEle1, arrayEle, loc);
 
-    // Push all the constructed intructions to dowhile block
+    // Push all the constructed instructions to dowhile block
     StmtList doStmtList;
     doStmtList.push_back(eleAssignment1);
     doStmtList.push_back(indexIncrAssign);
@@ -745,7 +745,7 @@ public:
       currBlock->insertStmtBefore(newStmt, currStmt);
     }
 
-    // now replace the function reference with the arraysecion of temp array.
+    // now replace the function reference with the arraysection of temp array.
     ref->replaceWith(tempArrSec->clone());
     return true;
   }
@@ -1848,7 +1848,7 @@ public:
       currBlock->insertStmtBefore(newStmt, currStmt);
     }
 
-    // now replace the function reference with the arraysecion of temp array.
+    // now replace the function reference with the arraysection of temp array.
     ref->replaceWith(tempArrSec->clone());
     return true;
   }
@@ -1976,7 +1976,7 @@ public:
       rhsSubsList.push_back(builder.buildObjectName(indVarList[0], loc));
 
     // for a = repeat(b(), dim, repeatCount)
-    // createt a(i, j) = b(k)
+    // create a(i, j) = b(k)
     // where k = i, if dim = 2 or k = j if dim = 1
     auto rhsSym = arraySection->getSymbol();
     auto rhsObj = builder.buildObjectName(rhsSym, loc);
