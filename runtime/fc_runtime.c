@@ -791,8 +791,8 @@ extern void __fc_runtime_sprintf(int numArgs, char *dest, ...) {
   va_end(list);
 }
 
-// Not sure how clock is calculared. ifort, gfortran, flang give
-// diffent outputs. We return epoch!
+// Not sure how clock is calculated. ifort, gfortran, flang give
+// different outputs. We return epoch!
 extern void __fc_runtime_isysClock(int *clock, int *rate, int *max) {
   *clock = (int)time(NULL);
   *rate = CLOCKS_PER_SEC;
