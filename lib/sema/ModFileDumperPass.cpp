@@ -49,7 +49,7 @@ class ModFileDumper : public ASTProgramPass {
 public:
   virtual bool runOnProgram(ParseTree *parseTree) override {
 
-    // Dump the remaining modules which are not procesed yet.
+    // Dump the remaining modules which are not processed yet.
     for (auto PU : parseTree->getProgramUnitList()) {
       if (!PU->isModule())
         continue;
