@@ -76,7 +76,7 @@ ASTPass *createArraySecExpanderPass(ASTContext &C);
 // Pass to expand the Where Statement
 ASTPass *createConstructExpanderPass(ASTContext &C);
 
-// Pass to expand intrinics.
+// Pass to expand intrinsics.
 ASTPass *createIntrinsicExpanderPass(ASTContext &C);
 
 // Pass to expand lbound/ubound intrinsics for static size arrays.
@@ -102,7 +102,7 @@ ASTPass *createArraySectionReplacerPass(ASTContext &C);
 // Pass to bind symbols in part-refs to correct symtab (after use-stmt handler)
 ASTPass *createPartRefSymResolverPass(ASTContext &C);
 
-// Pass to infer openmp symbools
+// Pass to infer openmp symbols
 ASTPass *createOpenMPSymbolInferPass(ASTContext &C);
 } // namespace fc
 
