@@ -28,7 +28,7 @@
 
 #include "llvm/ADT/StringRef.h"
 
-// Hanling error warning etc.
+// Handling error warning etc.
 namespace fc {
 
 struct SourceLoc;
