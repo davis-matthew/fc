@@ -97,7 +97,7 @@ public:
     fc::ast::ProgramUnit *currPU;
     mlir::Region *currRegion;
     llvm::StringMap<mlir::Value> symbolMap;
-    // Map holds the file descripter and corresponding file unit number
+    // Map holds the file descriptor and corresponding file unit number
     std::map<long int, mlir::Value> FDMap;
 
     // Map to track the loops
@@ -160,7 +160,7 @@ public:
 
   mlir::Value getValue(Symbol *symbol);
 
-  std::string getTypeForProramUnit(ProgramUnit *PU);
+  std::string getTypeForProgramUnit(ProgramUnit *PU);
 
   void populateExtraArgumentType(llvm::SmallVector<mlir::Type, 2> &argTypes);
 
