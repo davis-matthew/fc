@@ -80,7 +80,7 @@ private:
   SymbolAttributes attributes;
 
   // Refers to the original symbol.
-  // Valid only if the curent symbol type is undeclared.
+  // Valid only if the current symbol type is undeclared.
   Symbol *parentSymbol;
 
   // Refers to the name of the original module
