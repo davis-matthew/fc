@@ -48,7 +48,7 @@ class ArrayType;
 
 using namespace ast;
 
-// Helper calss for conversoin from AST types/ names to LLVM IR.
+// Helper calls for conversion from AST types/ names to LLVM IR.
 class CGASTHelper {
 private:
   ast::ParseTree *parseTree;
@@ -59,7 +59,7 @@ private:
   // Map to track functions and their return global value
   std::map<std::string, mlir::Value> FuncRetMap;
 
-  // Map to keep track of orinal PU name emitted PU name
+  // Map to keep track of original PU name emitted PU name
   std::map<std::string, std::string> PUNameMap;
 
   // This structure is to help emission of
