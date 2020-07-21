@@ -84,7 +84,7 @@ public:
 
   ConstantVal *buildConstantVal(Constant *constant, SourceLoc loc);
 
-  // build action statments
+  // build action statements
   AssignmentStmt *buildAssignmentStmt(Expr *lhs, Expr *rhs,
                                       SourceLoc _sourceLoc);
 
