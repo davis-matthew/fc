@@ -221,7 +221,7 @@ private:
   // TypeUpdaterPass)
   bool isCompleteTy;
 
-  // There'a recursive derived-type-def problem here, given:
+  // There's a recursive derived-type-def problem here, given:
   // Self-referential derived-type-def, ie:
   // type :: a {...; type(a), pointer; ...}
   //
