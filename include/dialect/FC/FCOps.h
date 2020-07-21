@@ -133,7 +133,7 @@ public:
   llvm::BitVector getSubscriptRangeInfo() const;
 };
 
-// Used to differeniate between the string and char array.
+// Used to differentiate between the string and char array.
 class StringInfoAttr
     : public mlir::Attribute::AttrBase<StringInfoAttr, mlir::Attribute,
                                        detail::SubscriptRangeAttrStorage> {
