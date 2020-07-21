@@ -164,7 +164,7 @@ protected:
   friend class ParseTreeBuilder;
 };
 
-// Level2 epxression
+// Level2 expression
 // TODO Currently only handling level-2 instructions,
 //      rename if separate class is required to represent other levels
 class BinaryExpr : public Expr {
@@ -245,7 +245,7 @@ protected:
   }
 };
 
-// For expresions of the form
+// For expressions of the form
 // ((expr(i, j)..., j = start, end), i = start, end)
 class IOImpliedDo : public Expr {
 protected:
